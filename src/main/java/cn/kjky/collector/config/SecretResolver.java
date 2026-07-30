@@ -15,7 +15,7 @@ public final class SecretResolver {
     public String required(String envName) {
         // value 是当前 Java 进程继承到的环境变量值。
         String value = System.getenv(envName);
-        if (value == null || value.isBlank()) throw new IllegalStateException("环境变量未设置: " + envName);
+        if (value == null || value.trim().isEmpty()) throw new IllegalStateException("环境变量未设置: " + envName);
         return value;
     }
 
@@ -26,8 +26,8 @@ public final class SecretResolver {
      * @return 环境变量值；未配置或为空时返回 null
      */
     public String optional(String envName) {
-        if (envName == null || envName.isBlank()) return null;
+        if (envName == null || envName.trim().isEmpty()) return null;
         String value = System.getenv(envName);
-        return value == null || value.isBlank() ? null : value;
+        return value == null || value.trim().isEmpty() ? null : value;
     }
 }

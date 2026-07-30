@@ -59,7 +59,9 @@ public final class ArmsRpcApi implements ArmsApi {
         request.setSysAction(action);
         request.setSysRegionId(config.regionId);
         request.putQueryParameter("RegionId", config.regionId);
-        parameters.forEach((k, v) -> { if (v != null && !v.isBlank()) request.putQueryParameter(k, v); });
+        parameters.forEach((k, v) -> {
+            if (v != null && !v.trim().isEmpty()) request.putQueryParameter(k, v);
+        });
         // response.data 保留服务端原始 JSON，不在适配器层做业务转换。
         CommonResponse response = client.getCommonResponse(request);
         String requestId = response.getHttpResponse() == null ? null : response.getHttpResponse().getHeaderValue("x-acs-request-id");

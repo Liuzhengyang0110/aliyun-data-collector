@@ -33,7 +33,9 @@ public final class CheckpointStore {
     public CheckpointStore(Path root, ObjectMapper json) throws IOException {
         this.file = root.resolve("checkpoints/checkpoint.json");
         this.json = json;
-        if (Files.isRegularFile(file)) completed = json.readValue(file.toFile(), new TypeReference<>() {});
+        if (Files.isRegularFile(file)) {
+            completed = json.readValue(file.toFile(), new TypeReference<Set<String>>() {});
+        }
         else completed = new LinkedHashSet<>();
     }
 

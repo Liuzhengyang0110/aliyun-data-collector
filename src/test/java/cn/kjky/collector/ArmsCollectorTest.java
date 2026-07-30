@@ -27,11 +27,11 @@ class ArmsCollectorTest {
         c.outputRoot = temp.toString();
         c.arms.enabled = true;
         c.arms.pageSize = 100;
-        var trace = new CollectorConfig.TraceQuery();
+        CollectorConfig.TraceQuery trace = new CollectorConfig.TraceQuery();
         trace.name = "trace-task";
         trace.recordType = "topology_edge";
         c.arms.traceQueries.add(trace);
-        var metric = new CollectorConfig.MetricQuery();
+        CollectorConfig.MetricQuery metric = new CollectorConfig.MetricQuery();
         metric.name = "metric-task";
         metric.recordType = "flow_feature";
         metric.metric = "m1";
@@ -55,12 +55,16 @@ class ArmsCollectorTest {
         final List<String> actions = new ArrayList<>();
         @Override public ApiResponse call(String action, Map<String, String> parameters) {
             actions.add(action);
-            return switch (action) {
-                case "SearchTracesByPage" -> new ApiResponse("{\"PageBean\":{\"TraceInfos\":[{\"TraceID\":\"t1\"}]}}", 200, "r1");
-                case "GetTrace" -> new ApiResponse("{\"Spans\":[{\"SpanId\":\"s1\"}]}", 200, "r2");
-                case "QueryMetric" -> new ApiResponse("{\"Data\":[{\"value\":1}]}", 200, "r3");
-                default -> throw new AssertionError(action);
-            };
+            if ("SearchTracesByPage".equals(action)) {
+                return new ApiResponse("{\"PageBean\":{\"TraceInfos\":[{\"TraceID\":\"t1\"}]}}", 200, "r1");
+            }
+            if ("GetTrace".equals(action)) {
+                return new ApiResponse("{\"Spans\":[{\"SpanId\":\"s1\"}]}", 200, "r2");
+            }
+            if ("QueryMetric".equals(action)) {
+                return new ApiResponse("{\"Data\":[{\"value\":1}]}", 200, "r3");
+            }
+            throw new AssertionError(action);
         }
     }
 }

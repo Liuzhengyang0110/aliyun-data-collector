@@ -8,6 +8,7 @@ import cn.kjky.collector.output.FileNaming;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -16,7 +17,7 @@ class CoreTest {
     void splitsWindowsAndUsesExistingNamingConvention() {
         Instant start = Instant.parse("2026-07-27T01:00:00Z");
         Instant end = Instant.parse("2026-07-27T01:25:00Z");
-        var windows = new WindowPlanner().split(start, end, 600);
+        List<TimeWindow> windows = new WindowPlanner().split(start, end, 600);
         assertThat(windows).hasSize(3);
         assertThat(windows.get(2).end()).isEqualTo(end);
 
@@ -32,7 +33,7 @@ class CoreTest {
         c.arms.endpoint = "arms.internal.example";
         c.arms.regionId = "cn-test";
         c.arms.version = "2019-08-08";
-        var q = new CollectorConfig.TraceQuery();
+        CollectorConfig.TraceQuery q = new CollectorConfig.TraceQuery();
         q.name = "traces";
         q.recordType = "topology_edge";
         c.arms.traceQueries.add(q);

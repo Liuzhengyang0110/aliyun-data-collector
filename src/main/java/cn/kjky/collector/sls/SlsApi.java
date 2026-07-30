@@ -39,43 +39,90 @@ public interface SlsApi extends AutoCloseable {
     /** 默认无需释放资源；SDK 实现会关闭连接池。 */
     @Override default void close() throws Exception {}
 
-    /**
-     * Logstore 列表页。
-     *
-     * @param logstores 本页 Logstore 名称
-     * @param total 服务端报告的总数
-     * @param requestId 请求 ID
-     */
-    record ListResult(List<String> logstores, int total, String requestId) {}
+    /** Logstore 列表页；普通不可变类用于兼容 Java 8。 */
+    final class ListResult {
+        private final List<String> logstores;
+        private final int total;
+        private final String requestId;
 
-    /**
-     * 一页 SLS 查询结果。
-     *
-     * @param completed 服务端是否完成本次查询
-     * @param logs 已解码日志列表
-     * @param rawQueryResult SDK 提供的原始聚合查询结果
-     * @param requestId 请求 ID
-     * @param scanBytes 扫描字节数
-     * @param elapsedMillis 服务端查询耗时毫秒数
-     */
-    record QueryResult(boolean completed, List<LogRecord> logs, String rawQueryResult, String requestId,
-                       long scanBytes, long elapsedMillis) {}
+        public ListResult(List<String> logstores, int total, String requestId) {
+            this.logstores = logstores;
+            this.total = total;
+            this.requestId = requestId;
+        }
 
-    /**
-     * 一条 SLS 日志。
-     *
-     * @param source 日志来源地址
-     * @param time Epoch 秒
-     * @param timeNsPart 纳秒补充部分
-     * @param contents 有序键值列表，可保留重复键
-     */
-    record LogRecord(String source, int time, int timeNsPart, List<Content> contents) {}
+        public List<String> logstores() { return logstores; }
+        public int total() { return total; }
+        public String requestId() { return requestId; }
+        public List<String> getLogstores() { return logstores; }
+        public int getTotal() { return total; }
+        public String getRequestId() { return requestId; }
+    }
 
-    /**
-     * 日志中的一个键值。
-     *
-     * @param key 字段名
-     * @param value 字段值
-     */
-    record Content(String key, String value) {}
+    /** 一页 SLS 查询结果。 */
+    final class QueryResult {
+        private final boolean completed;
+        private final List<LogRecord> logs;
+        private final String rawQueryResult;
+        private final String requestId;
+        private final long scanBytes;
+        private final long elapsedMillis;
+
+        public QueryResult(boolean completed, List<LogRecord> logs, String rawQueryResult, String requestId,
+                           long scanBytes, long elapsedMillis) {
+            this.completed = completed;
+            this.logs = logs;
+            this.rawQueryResult = rawQueryResult;
+            this.requestId = requestId;
+            this.scanBytes = scanBytes;
+            this.elapsedMillis = elapsedMillis;
+        }
+
+        public boolean completed() { return completed; }
+        public List<LogRecord> logs() { return logs; }
+        public String rawQueryResult() { return rawQueryResult; }
+        public String requestId() { return requestId; }
+        public long scanBytes() { return scanBytes; }
+        public long elapsedMillis() { return elapsedMillis; }
+        public boolean isCompleted() { return completed; }
+        public List<LogRecord> getLogs() { return logs; }
+        public String getRawQueryResult() { return rawQueryResult; }
+        public String getRequestId() { return requestId; }
+        public long getScanBytes() { return scanBytes; }
+        public long getElapsedMillis() { return elapsedMillis; }
+    }
+
+    /** 一条 SLS 日志。 */
+    final class LogRecord {
+        private final String source;
+        private final int time;
+        private final int timeNsPart;
+        private final List<Content> contents;
+
+        public LogRecord(String source, int time, int timeNsPart, List<Content> contents) {
+            this.source = source;
+            this.time = time;
+            this.timeNsPart = timeNsPart;
+            this.contents = contents;
+        }
+
+        public String getSource() { return source; }
+        public int getTime() { return time; }
+        public int getTimeNsPart() { return timeNsPart; }
+        public List<Content> getContents() { return contents; }
+    }
+
+    /** 日志中的一个键值。 */
+    final class Content {
+        private final String key;
+        private final String value;
+
+        public Content(String key, String value) {
+            this.key = key;
+            this.value = value;
+        }
+
+        public String getKey() { return key; }
+        public String getValue() { return value; }
+    }
 }

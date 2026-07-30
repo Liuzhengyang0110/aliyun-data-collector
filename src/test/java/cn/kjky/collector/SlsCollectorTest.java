@@ -13,6 +13,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -25,9 +27,9 @@ class SlsCollectorTest {
         CollectorConfig c = CoreTest.base();
         c.outputRoot = temp.toString();
         c.sls.enabled = true;
-        var project = new CollectorConfig.SlsProject();
+        CollectorConfig.SlsProject project = new CollectorConfig.SlsProject();
         project.project = "p1";
-        var logstore = new CollectorConfig.SlsLogstore();
+        CollectorConfig.SlsLogstore logstore = new CollectorConfig.SlsLogstore();
         logstore.logstore = "l1";
         logstore.recordType = "flow_record";
         logstore.pageSize = 2;
@@ -56,16 +58,19 @@ class SlsCollectorTest {
     static class FakeSls implements SlsApi {
         int calls;
         @Override public ListResult listLogstores(String project, int offset, int size) {
-            return new ListResult(List.of("l1"), 1, "list-request");
+            return new ListResult(Collections.singletonList("l1"), 1, "list-request");
         }
         @Override public QueryResult getLogs(String project, String logstore, int from, int to, String topic,
                                              String query, long offset, long line, boolean reverse) {
             calls++;
-            if (offset == 0) return new QueryResult(true, List.of(record("a"), record("b")), null, "r1", 10, 2);
-            return new QueryResult(true, List.of(record("c")), null, "r2", 5, 1);
+            if (offset == 0) {
+                return new QueryResult(true, Arrays.asList(record("a"), record("b")), null, "r1", 10, 2);
+            }
+            return new QueryResult(true, Collections.singletonList(record("c")), null, "r2", 5, 1);
         }
         private LogRecord record(String value) {
-            return new LogRecord("127.0.0.1", 1, 0, List.of(new Content("message", value)));
+            return new LogRecord("127.0.0.1", 1, 0,
+                    Collections.singletonList(new Content("message", value)));
         }
     }
 }

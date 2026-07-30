@@ -9,9 +9,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * ARMS 采集编排器。
@@ -22,7 +26,9 @@ import java.util.Map;
  */
 public final class ArmsCollector {
     /** 代码层允许调用的只读动作白名单，防止配置透传出写操作。 */
-    private static final List<String> ALLOWED_ACTIONS = List.of("ListTraceApps", "SearchTracesByPage", "GetTrace", "QueryMetric", "QueryMetricByPage", "QueryDataset");
+    private static final List<String> ALLOWED_ACTIONS = Collections.unmodifiableList(Arrays.asList(
+            "ListTraceApps", "SearchTracesByPage", "GetTrace",
+            "QueryMetric", "QueryMetricByPage", "QueryDataset"));
     /** 全局配置，主要使用 arms 和 runtime 节点。 */
     private final CollectorConfig config;
     /** RPC 或 Dataset API 实现。 */
@@ -59,7 +65,8 @@ public final class ArmsCollector {
      */
     public ArmsApi.ApiResponse discover() throws Exception {
         ensureAllowed("ListTraceApps");
-        return retry.execute("ARMS ListTraceApps", () -> api.call("ListTraceApps", Map.of()));
+        return retry.execute("ARMS ListTraceApps",
+                () -> api.call("ListTraceApps", Collections.<String, String>emptyMap()));
     }
 
     /**
@@ -71,8 +78,8 @@ public final class ArmsCollector {
     public void collect(TimeWindow window) throws Exception {
         if ("DATASET".equalsIgnoreCase(config.arms.mode)) collectDatasets(window);
         else {
-            for (var query : config.arms.traceQueries) collectTraces(query, window);
-            for (var query : config.arms.metricQueries) collectMetric(query, window);
+            for (CollectorConfig.TraceQuery query : config.arms.traceQueries) collectTraces(query, window);
+            for (CollectorConfig.MetricQuery query : config.arms.metricQueries) collectMetric(query, window);
         }
     }
 
@@ -145,7 +152,8 @@ public final class ArmsCollector {
         if (checkpoint.contains(key)) return;
         ensureAllowed("GetTrace");
         // detail 是 GetTrace 的原始 JSON 响应。
-        ArmsApi.ApiResponse detail = retry.execute("ARMS GetTrace", () -> api.call("GetTrace", Map.of("TraceID", traceId)));
+        ArmsApi.ApiResponse detail = retry.execute("ARMS GetTrace",
+                () -> api.call("GetTrace", Collections.singletonMap("TraceID", traceId)));
         // spans 仅用于 manifest 的记录数，无法识别时最终记录为 0。
         long spans = findArraySize(output.json().readTree(detail.body()), "Spans");
         output.write("arms", q.recordType, w, detail.body().getBytes(StandardCharsets.UTF_8), Math.max(spans, 0), detail.requestId());
@@ -175,7 +183,7 @@ public final class ArmsCollector {
         for (int i = 0; i < q.customFilters.size(); i++) p.put("CustomFilters." + (i + 1), q.customFilters.get(i));
         // filterIndex 从 1 开始，符合阿里云 RPC 结构化数组编码规则。
         int filterIndex = 1;
-        for (var filter : q.filters.entrySet()) {
+        for (Map.Entry<String, String> filter : q.filters.entrySet()) {
             p.put("Filters." + filterIndex + ".Key", filter.getKey());
             p.put("Filters." + filterIndex + ".Value", filter.getValue());
             filterIndex++;
@@ -195,7 +203,7 @@ public final class ArmsCollector {
      * @throws Exception HTTP 查询、落盘或 checkpoint 更新失败
      */
     private void collectDatasets(TimeWindow w) throws Exception {
-        for (var q : config.arms.dataset.queries) {
+        for (CollectorConfig.DatasetQuery q : config.arms.dataset.queries) {
             // key 标识“Dataset 任务 + 窗口”，成功后恢复流程会直接跳过。
             String key = "arms|dataset|" + q.name + "|" + w.start();
             if (checkpoint.contains(key)) continue;
@@ -224,7 +232,7 @@ public final class ArmsCollector {
             // root 是响应 JSON 根节点。
             JsonNode root = output.json().readTree(body);
             if (root.isArray()) return root.size();
-            for (String name : List.of("Data", "data", "Records", "records")) {
+            for (String name : Arrays.asList("Data", "data", "Records", "records")) {
                 JsonNode n = root.get(name);
                 if (n != null && n.isArray()) return n.size();
             }
@@ -242,8 +250,8 @@ public final class ArmsCollector {
     private List<String> findTextValues(JsonNode node, String... names) {
         // result 是递归遍历期间的可变结果容器。
         List<String> result = new ArrayList<>();
-        walk(node, result, List.of(names));
-        return result.stream().distinct().toList();
+        walk(node, result, Arrays.asList(names));
+        return result.stream().distinct().collect(Collectors.toList());
     }
 
     /**
@@ -273,9 +281,9 @@ public final class ArmsCollector {
         if (node == null) return -1;
         if (node.isObject()) {
             // it 遍历当前对象的所有字段；找不到时继续递归子节点。
-            var it = node.fields();
+            Iterator<Map.Entry<String, JsonNode>> it = node.fields();
             while (it.hasNext()) {
-                var e = it.next();
+                Map.Entry<String, JsonNode> e = it.next();
                 if (field.equalsIgnoreCase(e.getKey()) && e.getValue().isArray()) return e.getValue().size();
                 long child = findArraySize(e.getValue(), field);
                 if (child >= 0) return child;
@@ -291,7 +299,9 @@ public final class ArmsCollector {
      * @param name 参数名
      * @param value 参数值
      */
-    private void put(Map<String, String> map, String name, String value) { if (value != null && !value.isBlank()) map.put(name, value); }
+    private void put(Map<String, String> map, String name, String value) {
+        if (value != null && !value.trim().isEmpty()) map.put(name, value);
+    }
 
     /**
      * 强制执行 ARMS 只读动作白名单。

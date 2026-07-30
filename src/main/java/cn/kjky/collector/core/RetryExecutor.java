@@ -55,18 +55,21 @@ public final class RetryExecutor {
      * @return true 表示异常可能是暂时性的；false 表示应立即失败
      */
     private boolean isRetryable(Exception e) {
-        if (e instanceof com.aliyun.openservices.log.exception.LogException le) {
+        if (e instanceof com.aliyun.openservices.log.exception.LogException) {
+            com.aliyun.openservices.log.exception.LogException le =
+                    (com.aliyun.openservices.log.exception.LogException) e;
             // status 是 SLS 返回的 HTTP 状态码；0 通常表示尚未获得 HTTP 响应。
             int status = le.GetHttpCode();
             return status == 0 || status == 408 || status == 429 || status >= 500;
         }
-        if (e instanceof com.aliyuncs.exceptions.ClientException ce) {
+        if (e instanceof com.aliyuncs.exceptions.ClientException) {
+            com.aliyuncs.exceptions.ClientException ce = (com.aliyuncs.exceptions.ClientException) e;
             // code 是阿里云核心 SDK 的错误码，通过关键词识别暂时性错误。
             String code = ce.getErrCode();
             if (code == null) return true;
             String lower = code.toLowerCase();
             return lower.contains("timeout") || lower.contains("throttl") || lower.contains("server") || lower.contains("network");
         }
-        return e instanceof java.io.IOException || e instanceof java.net.http.HttpTimeoutException;
+        return e instanceof java.io.IOException;
     }
 }

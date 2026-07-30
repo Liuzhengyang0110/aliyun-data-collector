@@ -10,11 +10,13 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * 在正式 manifest 丢失时，从 raw 文件名和内容重建辅助清单。
@@ -35,7 +37,7 @@ public final class ManifestRebuilder {
      */
     public Path rebuild(CollectorConfig c) throws IOException {
         // root 是规范化输出根目录；m 是待构建的新清单。
-        Path root = Path.of(c.outputRoot).toAbsolutePath().normalize();
+        Path root = Paths.get(c.outputRoot).toAbsolutePath().normalize();
         Manifest m = new Manifest();
         m.schemaVersion = c.schemaVersion;
         m.projectCode = c.projectCode;
@@ -48,7 +50,7 @@ public final class ManifestRebuilder {
         Hashing hashing = new Hashing();
         // raw 是扫描起点，仅处理其中的 .json 正式文件。
         Path raw = root.resolve("raw");
-        if (Files.isDirectory(raw)) try (var paths = Files.walk(raw)) {
+        if (Files.isDirectory(raw)) try (Stream<Path> paths = Files.walk(raw)) {
             paths.filter(Files::isRegularFile).filter(p -> p.getFileName().toString().endsWith(".json")).sorted().forEach(p -> {
                 try {
                     // e 保存能够从路径、文件名和内容重新推导的字段。

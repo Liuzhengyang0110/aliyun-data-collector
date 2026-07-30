@@ -10,6 +10,7 @@ import com.aliyun.openservices.log.response.GetLogsResponse;
 import com.aliyun.openservices.log.response.ListLogStoresResponse;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /** 基于阿里云 SLS Java SDK 的只读适配器。 */
@@ -43,7 +44,9 @@ public final class SlsSdkApi implements SlsApi {
     public ListResult listLogstores(String project, int offset, int size) throws Exception {
         // response 是 SDK 原生返回对象，随后转换为内部不可变记录。
         ListLogStoresResponse response = client.ListLogStores(project, offset, size, "");
-        return new ListResult(List.copyOf(response.GetLogStores()), response.GetTotal(), response.GetRequestId());
+        return new ListResult(
+                Collections.unmodifiableList(new ArrayList<String>(response.GetLogStores())),
+                response.GetTotal(), response.GetRequestId());
     }
 
     /**

@@ -1,7 +1,7 @@
 package cn.kjky.collector.config;
 
 import java.nio.file.InvalidPathException;
-import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -32,7 +32,7 @@ public final class ConfigValidator {
         requiredToken(errors, "batchId", c.batchId);
         requiredToken(errors, "caseId", c.caseId);
         try { ZoneId.of(c.timezone); } catch (Exception e) { errors.add("timezone 无效: " + c.timezone); }
-        try { Path.of(c.outputRoot); } catch (InvalidPathException | NullPointerException e) { errors.add("outputRoot 无效"); }
+        try { Paths.get(c.outputRoot); } catch (InvalidPathException | NullPointerException e) { errors.add("outputRoot 无效"); }
         if (c.runtime.windowSeconds <= 0) errors.add("runtime.windowSeconds 必须大于 0");
         if (c.runtime.maxRetries < 0) errors.add("runtime.maxRetries 不能小于 0");
         if (c.runtime.maxPollAttempts <= 0) errors.add("runtime.maxPollAttempts 必须大于 0");
@@ -56,7 +56,7 @@ public final class ConfigValidator {
      */
     private void validateArms(CollectorConfig c, List<String> errors, Set<String> names, boolean secrets) {
         // a 是 arms 配置的局部别名，减少后续重复访问 c.arms。
-        var a = c.arms;
+        CollectorConfig.ArmsConfig a = c.arms;
         if (!"RPC".equalsIgnoreCase(a.mode) && !"DATASET".equalsIgnoreCase(a.mode)) {
             errors.add("arms.mode 只能是 RPC 或 DATASET");
         }
@@ -70,8 +70,8 @@ public final class ConfigValidator {
             if (a.pageSize < 1 || a.pageSize > 100) errors.add("arms.pageSize 必须在 1..100");
             if (secrets) secret(errors, a.accessKeyIdEnv, "ARMS AccessKey ID");
             if (secrets) secret(errors, a.accessKeySecretEnv, "ARMS AccessKey Secret");
-            for (var q : a.traceQueries) task(errors, names, "arms.traceQueries", q.name, q.recordType);
-            for (var q : a.metricQueries) {
+            for (CollectorConfig.TraceQuery q : a.traceQueries) task(errors, names, "arms.traceQueries", q.name, q.recordType);
+            for (CollectorConfig.MetricQuery q : a.metricQueries) {
                 task(errors, names, "arms.metricQueries", q.name, q.recordType);
                 if (!"QueryMetric".equals(q.action) && !"QueryMetricByPage".equals(q.action)) {
                     errors.add("指标任务 " + q.name + " 的 action 只能是 QueryMetric 或 QueryMetricByPage");
@@ -83,7 +83,7 @@ public final class ConfigValidator {
         } else {
             required(errors, "arms.dataset.url", a.dataset.url);
             if (secrets) secret(errors, a.dataset.usernameEnv, "ARMS Dataset 用户名");
-            for (var q : a.dataset.queries) {
+            for (CollectorConfig.DatasetQuery q : a.dataset.queries) {
                 task(errors, names, "arms.dataset.queries", q.name, q.recordType);
                 required(errors, "arms.dataset.queries.datasetId", q.datasetId);
                 if (q.measures.size() > 3) errors.add("Dataset 任务 " + q.name + " 的 measures 最多 3 个");
@@ -101,16 +101,16 @@ public final class ConfigValidator {
      */
     private void validateSls(CollectorConfig c, List<String> errors, Set<String> names, boolean secrets) {
         // s 是 sls 配置的局部别名。
-        var s = c.sls;
+        CollectorConfig.SlsConfig s = c.sls;
         required(errors, "sls.endpoint", s.endpoint);
         required(errors, "sls.accessKeyIdEnv", s.accessKeyIdEnv);
         required(errors, "sls.accessKeySecretEnv", s.accessKeySecretEnv);
         if (secrets) secret(errors, s.accessKeyIdEnv, "SLS AccessKey ID");
         if (secrets) secret(errors, s.accessKeySecretEnv, "SLS AccessKey Secret");
         if (s.projects == null || s.projects.isEmpty()) errors.add("sls.projects 不能为空");
-        for (var p : s.projects) {
+        for (CollectorConfig.SlsProject p : s.projects) {
             required(errors, "sls.projects.project", p.project);
-            for (var l : p.logstores) {
+            for (CollectorConfig.SlsLogstore l : p.logstores) {
                 task(errors, names, "sls.logstores", p.project + "." + l.logstore, l.recordType);
                 required(errors, "sls.logstores.logstore", l.logstore);
                 if (l.pageSize < 1 || l.pageSize > 100) errors.add("SLS " + l.logstore + " 的 pageSize 必须在 1..100");
@@ -141,7 +141,7 @@ public final class ConfigValidator {
      * @param value 字段值
      */
     private void required(List<String> errors, String name, String value) {
-        if (value == null || value.isBlank() || value.startsWith("__REQUIRED")) errors.add(name + " 未配置");
+        if (value == null || value.trim().isEmpty() || value.startsWith("__REQUIRED")) errors.add(name + " 未配置");
     }
 
     /**
@@ -166,7 +166,8 @@ public final class ConfigValidator {
      * @param label 面向用户显示的凭据名称
      */
     private void secret(List<String> errors, String envName, String label) {
-        if (envName == null || envName.isBlank() || System.getenv(envName) == null || System.getenv(envName).isBlank()) {
+        if (envName == null || envName.trim().isEmpty() || System.getenv(envName) == null
+                || System.getenv(envName).trim().isEmpty()) {
             errors.add(label + " 对应环境变量未设置: " + envName);
         }
     }

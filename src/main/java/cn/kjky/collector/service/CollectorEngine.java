@@ -19,9 +19,11 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import java.time.Instant;
+import java.nio.file.Paths;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 顶层业务编排器。
@@ -58,7 +60,7 @@ public final class CollectorEngine {
         Map<String, Object> result = new LinkedHashMap<>();
         if (config.arms.enabled) try (ArmsApi api = armsApi()) {
             if ("RPC".equalsIgnoreCase(config.arms.mode)) {
-                var response = new ArmsCollector(config, api, retry, null, null).discover();
+                ArmsApi.ApiResponse response = new ArmsCollector(config, api, retry, null, null).discover();
                 result.put("arms", json.readTree(response.body()));
             } else result.put("arms", "DATASET 模式没有应用发现接口，请按现场文档填写 datasetId");
         }
@@ -79,7 +81,7 @@ public final class CollectorEngine {
         if (!config.arms.enabled || "RPC".equalsIgnoreCase(config.arms.mode)) return discover();
         if (config.arms.dataset.queries.isEmpty()) throw new IllegalArgumentException("Dataset 模式至少需要一个查询任务才能探测");
         // q 是第一个 Dataset 查询任务，用于构造最小探测请求。
-        var q = config.arms.dataset.queries.get(0);
+        CollectorConfig.DatasetQuery q = config.arms.dataset.queries.get(0);
         // end 是探测时刻；查询范围固定为 end 前 60 秒。
         Instant end = Instant.now();
         // parameters 是最终表单参数，不修改原配置中的 Map。
@@ -93,7 +95,11 @@ public final class CollectorEngine {
         Map<String, Object> result = new LinkedHashMap<>();
         try (ArmsApi api = armsApi()) {
             ArmsApi.ApiResponse response = retry.execute("ARMS Dataset probe", () -> api.call("QueryDataset", parameters));
-            result.put("arms", Map.of("mode", "DATASET", "httpStatus", response.httpStatus(), "requestId", response.requestId() == null ? "" : response.requestId()));
+            Map<String, Object> armsResult = new LinkedHashMap<>();
+            armsResult.put("mode", "DATASET");
+            armsResult.put("httpStatus", response.httpStatus());
+            armsResult.put("requestId", response.requestId() == null ? "" : response.requestId());
+            result.put("arms", armsResult);
         }
         if (config.sls.enabled) try (SlsApi api = new SlsSdkApi(config.sls, secrets)) {
             result.put("sls", new SlsCollector(config, api, retry, null, null).discover());
@@ -119,11 +125,16 @@ public final class CollectorEngine {
         plan.put("windowSeconds", config.runtime.windowSeconds);
         plan.put("windowCount", windows.size());
         plan.put("armsMode", config.arms.enabled ? config.arms.mode : "disabled");
-        plan.put("armsTraceTasks", config.arms.traceQueries.stream().map(q -> q.name).toList());
-        plan.put("armsMetricTasks", config.arms.metricQueries.stream().map(q -> q.name).toList());
-        plan.put("armsDatasetTasks", config.arms.dataset.queries.stream().map(q -> q.name).toList());
-        plan.put("slsLogstores", config.sls.projects.stream().flatMap(p -> p.logstores.stream().map(l -> p.project + "/" + l.logstore)).toList());
-        plan.put("outputRoot", java.nio.file.Path.of(config.outputRoot).toAbsolutePath().normalize().toString());
+        plan.put("armsTraceTasks", config.arms.traceQueries.stream()
+                .map(q -> q.name).collect(Collectors.toList()));
+        plan.put("armsMetricTasks", config.arms.metricQueries.stream()
+                .map(q -> q.name).collect(Collectors.toList()));
+        plan.put("armsDatasetTasks", config.arms.dataset.queries.stream()
+                .map(q -> q.name).collect(Collectors.toList()));
+        plan.put("slsLogstores", config.sls.projects.stream()
+                .flatMap(p -> p.logstores.stream().map(l -> p.project + "/" + l.logstore))
+                .collect(Collectors.toList()));
+        plan.put("outputRoot", Paths.get(config.outputRoot).toAbsolutePath().normalize().toString());
         return json.writeValueAsString(plan);
     }
 

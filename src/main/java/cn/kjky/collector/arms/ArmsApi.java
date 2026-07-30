@@ -20,12 +20,25 @@ public interface ArmsApi extends AutoCloseable {
     /** 默认无需释放资源；持有连接池的实现会覆盖该方法。 */
     @Override default void close() throws Exception {}
 
-    /**
-     * ARMS API 的最小通用响应。
-     *
-     * @param body 原始响应正文
-     * @param httpStatus HTTP 状态码
-     * @param requestId 服务端请求 ID，响应未提供时为 null
-     */
-    record ApiResponse(String body, int httpStatus, String requestId) {}
+    /** ARMS API 的最小通用响应；使用普通类以兼容 Java 8。 */
+    final class ApiResponse {
+        private final String body;
+        private final int httpStatus;
+        private final String requestId;
+
+        /**
+         * @param body 原始响应正文
+         * @param httpStatus HTTP 状态码
+         * @param requestId 服务端请求 ID，响应未提供时为 null
+         */
+        public ApiResponse(String body, int httpStatus, String requestId) {
+            this.body = body;
+            this.httpStatus = httpStatus;
+            this.requestId = requestId;
+        }
+
+        public String body() { return body; }
+        public int httpStatus() { return httpStatus; }
+        public String requestId() { return requestId; }
+    }
 }

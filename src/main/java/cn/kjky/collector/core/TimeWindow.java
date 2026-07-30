@@ -4,13 +4,29 @@ import java.time.Instant;
 
 /**
  * 一个逻辑上的左闭右开采集窗口 {@code [start, end)}。
- *
- * @param start 窗口开始时刻（包含）
- * @param end 窗口结束时刻（不包含）
+ * 使用普通不可变类而不是 record，以兼容 Java 8。
  */
-public record TimeWindow(Instant start, Instant end) {
-    /** 校验窗口两端都存在，并且开始严格早于结束。 */
-    public TimeWindow {
+public final class TimeWindow {
+    /** 窗口开始时刻（包含）。 */
+    private final Instant start;
+    /** 窗口结束时刻（不包含）。 */
+    private final Instant end;
+
+    /**
+     * 创建并校验时间窗口。
+     *
+     * @param start 窗口开始时刻
+     * @param end 窗口结束时刻
+     */
+    public TimeWindow(Instant start, Instant end) {
         if (start == null || end == null || !start.isBefore(end)) throw new IllegalArgumentException("时间窗必须满足 start < end");
+        this.start = start;
+        this.end = end;
     }
+
+    /** @return 窗口开始时刻 */
+    public Instant start() { return start; }
+
+    /** @return 窗口结束时刻 */
+    public Instant end() { return end; }
 }

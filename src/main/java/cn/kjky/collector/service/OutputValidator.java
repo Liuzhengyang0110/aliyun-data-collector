@@ -9,9 +9,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /** 根据正式 manifest 校验本地采集包完整性。 */
 public final class OutputValidator {
@@ -27,7 +29,9 @@ public final class OutputValidator {
         List<String> errors = new ArrayList<>();
         // manifestFile 是正式清单位置。
         Path manifestFile = root.resolve("manifest/manifest.json");
-        if (!Files.isRegularFile(manifestFile)) return List.of("manifest/manifest.json 不存在");
+        if (!Files.isRegularFile(manifestFile)) {
+            return Collections.singletonList("manifest/manifest.json 不存在");
+        }
         ObjectMapper json = new ObjectMapper().registerModule(new JavaTimeModule());
         // manifest 提供期望文件列表；hashing 重新计算实际 SHA-256。
         Manifest manifest = json.readValue(manifestFile.toFile(), Manifest.class);
@@ -44,7 +48,7 @@ public final class OutputValidator {
             if (!hashing.sha256(file).equalsIgnoreCase(entry.sha256)) errors.add("SHA-256 不符: " + entry.relativePath);
         }
         // stream 扫描所有 raw 子目录，发现中断遗留的 .partial 文件。
-        try (var stream = Files.walk(root.resolve("raw"))) {
+        try (Stream<Path> stream = Files.walk(root.resolve("raw"))) {
             stream.filter(Files::isRegularFile).filter(p -> p.getFileName().toString().endsWith(".partial"))
                     .forEach(p -> errors.add("发现未完成文件: " + root.relativize(p)));
         }

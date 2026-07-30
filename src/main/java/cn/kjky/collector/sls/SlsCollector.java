@@ -52,7 +52,7 @@ public final class SlsCollector {
     public Map<String, SlsApi.ListResult> discover() throws Exception {
         // result 按 YAML 中 Project 顺序保存，便于现场阅读。
         Map<String, SlsApi.ListResult> result = new LinkedHashMap<>();
-        for (var project : config.sls.projects) {
+        for (CollectorConfig.SlsProject project : config.sls.projects) {
             // offset 是下一页起始位置；all 累积当前 Project 的所有名称。
             int offset = 0;
             java.util.List<String> all = new java.util.ArrayList<>();
@@ -92,8 +92,10 @@ public final class SlsCollector {
         // from、to 是实际传给 SLS SDK 的 Epoch 秒闭区间。
         int from = (int) fromLong;
         int to = (int) toLong;
-        for (var project : config.sls.projects) {
-            for (var logstore : project.logstores) collectLogstore(project.project, logstore, window, from, to);
+        for (CollectorConfig.SlsProject project : config.sls.projects) {
+            for (CollectorConfig.SlsLogstore logstore : project.logstores) {
+                collectLogstore(project.project, logstore, window, from, to);
+            }
         }
     }
 

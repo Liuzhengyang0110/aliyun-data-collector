@@ -7,9 +7,10 @@ import cn.kjky.collector.service.CollectorEngine;
 import cn.kjky.collector.service.ManifestRebuilder;
 import cn.kjky.collector.service.OutputValidator;
 
-import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,9 +57,9 @@ public final class CollectorApplication {
             String configPath = options.get("config");
             if (configPath == null) throw new IllegalArgumentException("缺少 --config <YAML文件>");
             // config 是 YAML 反序列化后的完整运行配置，后续服务只使用这个对象。
-            CollectorConfig config = new ConfigLoader().load(Path.of(configPath));
+            CollectorConfig config = new ConfigLoader().load(Paths.get(configPath));
             // 只有实际访问 API 的命令才要求当前进程已设置凭据环境变量。
-            boolean requireSecrets = List.of("probe", "discover", "collect", "resume").contains(command);
+            boolean requireSecrets = Arrays.asList("probe", "discover", "collect", "resume").contains(command);
             List<String> errors = new ConfigValidator().validate(config, requireSecrets);
             if (!errors.isEmpty()) {
                 System.err.println("配置校验失败:");
@@ -67,20 +68,44 @@ public final class CollectorApplication {
             }
             // engine 统一编排发现、探测、预演和采集流程。
             CollectorEngine engine = new CollectorEngine(config);
-            return switch (command) {
-                case "validate-config" -> { System.out.println("配置有效（未读取凭据内容）"); yield 0; }
-                case "probe" -> { System.out.println(engine.probe()); yield 0; }
-                case "discover" -> { System.out.println(engine.discover()); yield 0; }
-                case "dry-run" -> { var range = range(options); System.out.println(engine.dryRun(range[0], range[1])); yield 0; }
-                case "collect", "resume" -> { var range = range(options); engine.collect(range[0], range[1]); System.out.println("采集完成: " + Path.of(config.outputRoot).toAbsolutePath().normalize()); yield 0; }
-                case "validate-output" -> {
-                    var validation = new OutputValidator().validate(Path.of(config.outputRoot).toAbsolutePath().normalize());
-                    if (validation.isEmpty()) { System.out.println("输出校验通过"); yield 0; }
-                    validation.forEach(e -> System.err.println("- " + e)); yield 3;
+            if ("validate-config".equals(command)) {
+                System.out.println("配置有效（未读取凭据内容）");
+                return 0;
+            }
+            if ("probe".equals(command)) {
+                System.out.println(engine.probe());
+                return 0;
+            }
+            if ("discover".equals(command)) {
+                System.out.println(engine.discover());
+                return 0;
+            }
+            if ("dry-run".equals(command)) {
+                Instant[] timeRange = range(options);
+                System.out.println(engine.dryRun(timeRange[0], timeRange[1]));
+                return 0;
+            }
+            if ("collect".equals(command) || "resume".equals(command)) {
+                Instant[] timeRange = range(options);
+                engine.collect(timeRange[0], timeRange[1]);
+                System.out.println("采集完成: " + Paths.get(config.outputRoot).toAbsolutePath().normalize());
+                return 0;
+            }
+            if ("validate-output".equals(command)) {
+                List<String> validation = new OutputValidator().validate(
+                        Paths.get(config.outputRoot).toAbsolutePath().normalize());
+                if (validation.isEmpty()) {
+                    System.out.println("输出校验通过");
+                    return 0;
                 }
-                case "build-manifest" -> { System.out.println("已生成: " + new ManifestRebuilder().rebuild(config)); yield 0; }
-                default -> throw new IllegalArgumentException("未知命令: " + command);
-            };
+                validation.forEach(e -> System.err.println("- " + e));
+                return 3;
+            }
+            if ("build-manifest".equals(command)) {
+                System.out.println("已生成: " + new ManifestRebuilder().rebuild(config));
+                return 0;
+            }
+            throw new IllegalArgumentException("未知命令: " + command);
         } catch (Exception e) {
             System.err.println("执行失败: " + safe(e));
             return 1;
@@ -151,19 +176,18 @@ public final class CollectorApplication {
 
     /** 打印支持的命令和基本用法。 */
     private static void help() {
-        System.out.println("""
-                阿里云原生只读数据采集程序
-                用法: java -jar aliyun-data-collector.jar <command> --config <site.yaml> [--start <ISO时间> --end <ISO时间>]
-
-                command:
-                  validate-config  校验配置结构，不访问 API
-                  probe            只读连通性与权限探测
-                  discover         列出 ARMS 应用和 SLS Logstore
-                  dry-run          展示分窗和采集任务，不访问 API
-                  collect          执行采集
-                  resume           按 checkpoint 断点续采
-                  validate-output  校验文件存在性、大小和 SHA-256
-                  build-manifest   从 raw 文件重建辅助 manifest
-                """);
+        System.out.println(
+                "阿里云原生只读数据采集程序\n" +
+                "用法: java -jar aliyun-data-collector.jar <command> --config <site.yaml> " +
+                "[--start <ISO时间> --end <ISO时间>]\n\n" +
+                "command:\n" +
+                "  validate-config  校验配置结构，不访问 API\n" +
+                "  probe            只读连通性与权限探测\n" +
+                "  discover         列出 ARMS 应用和 SLS Logstore\n" +
+                "  dry-run          展示分窗和采集任务，不访问 API\n" +
+                "  collect          执行采集\n" +
+                "  resume           按 checkpoint 断点续采\n" +
+                "  validate-output  校验文件存在性、大小和 SHA-256\n" +
+                "  build-manifest   从 raw 文件重建辅助 manifest");
     }
 }

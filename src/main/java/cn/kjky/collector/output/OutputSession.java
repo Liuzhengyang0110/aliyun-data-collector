@@ -11,6 +11,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.HashMap;
@@ -47,7 +49,7 @@ public final class OutputSession {
      */
     public OutputSession(CollectorConfig config, Instant start, Instant end) throws IOException {
         this.config = config;
-        this.root = Path.of(config.outputRoot).toAbsolutePath().normalize();
+        this.root = Paths.get(config.outputRoot).toAbsolutePath().normalize();
         this.json = new ObjectMapper().registerModule(new JavaTimeModule()).enable(SerializationFeature.INDENT_OUTPUT);
         Files.createDirectories(root.resolve("raw/arms"));
         Files.createDirectories(root.resolve("raw/sls"));
@@ -166,8 +168,8 @@ public final class OutputSession {
         // sanitized 去掉凭据关键词和换行，确保每条日志只占一行。
         String sanitized = safe(message).replace("\r", " ").replace("\n", " ");
         String line = Instant.now() + "\t" + level + "\t" + sanitized + System.lineSeparator();
-        Files.writeString(root.resolve("logs/collector.log"), line, StandardCharsets.UTF_8,
-                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        Files.write(root.resolve("logs/collector.log"), line.getBytes(StandardCharsets.UTF_8),
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
     }
 
     /** @return 绝对输出根目录 */

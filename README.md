@@ -1,6 +1,6 @@
 # 阿里云原生数据采集程序
 
-本程序面向 Apsara Stack/阿里云专有云现场环境，用 Java 只读调用 ARMS 和 SLS API，将链路、指标和日志数据保存为本地 JSON 文件。程序既可以作为独立可执行 JAR 使用，后续也可以把核心采集类接入 Spring Boot 平台。
+本程序面向 Apsara Stack/阿里云专有云现场环境，用 Java 只读调用 ARMS 和 SLS API，将链路、指标和日志数据保存为本地 JSON 文件。当前 `jdk-8` 分支不依赖 Spring Boot 运行环境，可作为独立可执行 JAR 使用；后续也可以把核心采集类接入 Spring Boot 平台。
 
 本文按照“出发前准备—现场配置—权限探测—短时间试采—正式采集—结果校验—断点恢复”的顺序说明完整使用方法。
 
@@ -52,8 +52,8 @@ target/aliyun-data-collector-0.1.0-SNAPSHOT.jar
 
 运行程序需要：
 
-- Windows PowerShell。
-- JDK 17 或更高版本。
+- Java 8 Update 192（`1.8.0_192`）或更高版本；仅运行程序时安装 JRE 即可。
+- Windows PowerShell 或 Linux Shell。
 - 能访问现场 ARMS/SLS Endpoint 的网络。
 - 已开通相应只读 API 权限的 AccessKey。
 - 已填写完成的现场 YAML 配置。
@@ -64,13 +64,17 @@ target/aliyun-data-collector-0.1.0-SNAPSHOT.jar
 java -version
 ```
 
-如果已经有构建好的 JAR，现场机器不需要 Maven。只有修改代码或重新打包时才需要 Maven 3.9+：
+跳板机的输出中应能看到 `java version "1.8.0_192"`，或者更高的 Java 版本。还应确认执行 `java` 命令的机器就是实际运行采集程序、能够访问 ARMS/SLS Endpoint 的机器。
+
+本分支使用 Java 8 API 编译，应用代码生成的 class 文件版本为 52。代码中未使用 record、switch 表达式、`java.net.http.HttpClient` 等 Java 9 及以上版本才提供的语法或 API。
+
+如果已经有构建好的可执行 JAR，现场机器不需要 Maven，也不需要下载运行时依赖。只有修改代码或重新打包时才需要 JDK 和 Maven 3.9+：
 
 ```powershell
 mvn clean package
 ```
 
-构建过程会运行单元测试；成功后在 `target` 目录生成 JAR。
+构建过程会运行单元测试，并通过 Maven Shade Plugin 把运行依赖打入同一个 JAR；成功后在 `target` 目录生成可执行 JAR。
 
 查看程序帮助：
 
