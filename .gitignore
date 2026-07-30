@@ -1,0 +1,7 @@
+/target/
+/.idea/
+/.vscode/
+/data-package/
+/config/site.yaml
+*.partial
+*.log

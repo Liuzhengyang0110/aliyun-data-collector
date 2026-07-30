@@ -1,0 +1,30 @@
+schemaVersion: "0.1.1"
+projectCode: "kjky20250400"
+envCode: "__REQUIRED_ON_SITE__"
+batchId: "__REQUIRED_ON_SITE__"
+caseId: "__REQUIRED_ON_SITE__"
+timezone: "Asia/Shanghai"
+outputRoot: "./data-package"
+runtime:
+  windowSeconds: 600
+  requestTimeoutSeconds: 30
+  maxRetries: 3
+  retryBaseMillis: 500
+  maxPollAttempts: 10
+  pollIntervalMillis: 1000
+arms:
+  enabled: true
+  mode: "DATASET"
+  dataset:
+    url: "__REQUIRED_ON_SITE__"
+    usernameEnv: "ARMS_DATASET_USERNAME"
+    passwordEnv: "ARMS_DATASET_PASSWORD"
+    queries:
+      - name: "dataset-query"
+        recordType: "flow_feature"
+        datasetId: "__REQUIRED_ON_SITE__"
+        intervalInSec: 60
+        measures: ["__REQUIRED_ON_SITE__"]
+        parameters: {}
+sls:
+  enabled: false

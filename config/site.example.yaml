@@ -1,0 +1,84 @@
+# 复制为 site.yaml 后在现场填写。所有 __REQUIRED_ON_SITE__ 都必须替换。
+# 不要把 AccessKey、密码或 STS Token 写入本文件；这里只写环境变量名。
+schemaVersion: "0.1.1"
+projectCode: "kjky20250400"
+envCode: "__REQUIRED_ON_SITE__"
+batchId: "__REQUIRED_ON_SITE__"
+caseId: "__REQUIRED_ON_SITE__"
+timezone: "Asia/Shanghai"
+outputRoot: "./data-package"
+
+runtime:
+  windowSeconds: 600
+  requestTimeoutSeconds: 30
+  maxRetries: 3
+  retryBaseMillis: 500
+  maxPollAttempts: 10
+  pollIntervalMillis: 1000
+
+arms:
+  enabled: true
+  # RPC：AccessKey 签名 API；DATASET：文档中的 Dataset 表单查询接口。
+  mode: "RPC"
+  endpoint: "__REQUIRED_ON_SITE__"
+  protocol: "HTTP"
+  regionId: "__REQUIRED_ON_SITE__"
+  product: "ARMS"
+  version: "__REQUIRED_ON_SITE__"
+  accessKeyIdEnv: "ARMS_ACCESS_KEY_ID"
+  accessKeySecretEnv: "ARMS_ACCESS_KEY_SECRET"
+  pageSize: 100
+  collectTraceDetails: true
+  traceQueries:
+    - name: "all-traces"
+      # 使用现有命名规范中的 record_type，不在程序中固定枚举。
+      recordType: "topology_edge"
+      pid: "__REQUIRED_ON_SITE__"
+      serviceName: null
+      operationName: null
+      traceId: null
+      minDuration: null
+      maxDuration: null
+      # 现场文档出现额外查询参数时在此透传。
+      parameters: {}
+  metricQueries:
+    - name: "service-metric"
+      recordType: "flow_feature"
+      # 甲方文档为 QueryMetric；若现场版本为分页接口可改为 QueryMetricByPage。
+      action: "QueryMetric"
+      metric: "__REQUIRED_ON_SITE__"
+      measures: ["__REQUIRED_ON_SITE__"]
+      dimensions: []
+      customFilters: []
+      # 文档存在“最小 60000”与示例“60”的口径差异，现场先用短查询确认单位。
+      interval: 60
+      limit: 10000
+      # 常用过滤条件；具体格式须用现场接口探测确认。
+      filters:
+        pid: "__REQUIRED_ON_SITE__"
+        regionId: "__REQUIRED_ON_SITE__"
+      # 常规数组会按 RPC 规范编码为 Measures.1、Filters.1.Key/Value 等；
+      # 如 Apsara Stack 版本有额外字段，可在这里直接补充。
+      parameters: {}
+  dataset:
+    url: "__REQUIRED_ON_SITE__"
+    usernameEnv: "ARMS_DATASET_USERNAME"
+    passwordEnv: "ARMS_DATASET_PASSWORD"
+    queries: []
+
+sls:
+  enabled: true
+  endpoint: "__REQUIRED_ON_SITE__"
+  accessKeyIdEnv: "SLS_ACCESS_KEY_ID"
+  accessKeySecretEnv: "SLS_ACCESS_KEY_SECRET"
+  # 不使用 STS 时不设置这个环境变量即可。
+  stsTokenEnv: "SLS_STS_TOKEN"
+  projects:
+    - project: "__REQUIRED_ON_SITE__"
+      logstores:
+        - logstore: "__REQUIRED_ON_SITE__"
+          recordType: "flow_record"
+          topic: ""
+          query: ""
+          pageSize: 100
+          reverse: false
