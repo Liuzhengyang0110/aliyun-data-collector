@@ -22,7 +22,13 @@ arms:
   mode: "RPC"
   endpoint: "__REQUIRED_ON_SITE__"
   protocol: "HTTP"
+  # 专有云 API 网关/SDK 路由地域；可能与资源 RegionId 不同。
+  apiRegionId: "__REQUIRED_ON_SITE__"
+  # ARMS 资源地域，作为接口查询参数 RegionId 发送。
   regionId: "__REQUIRED_ON_SITE__"
+  # 现场接口不要求时可留空；非空时分别发送对应 x-acs-* 请求头。
+  organizationId: ""
+  resourceGroupId: ""
   product: "ARMS"
   version: "__REQUIRED_ON_SITE__"
   accessKeyIdEnv: "ARMS_ACCESS_KEY_ID"

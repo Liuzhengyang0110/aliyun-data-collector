@@ -25,7 +25,7 @@
 - SLS 只调用：`ListLogStores`、`GetLogs`。
 - 代码中没有创建、更新、删除、写日志、创建索引、分裂或合并 Shard 的调用。
 - AccessKey、密码和 STS Token 只从运行进程的环境变量读取。
-- Endpoint、RegionId、API Version、PID、Dataset ID、Project、Logstore、查询条件和命名字段均由 YAML 配置提供。
+- Endpoint、ApiRegionId、RegionId、组织/资源组请求头、API Version、PID、Dataset ID、Project、Logstore、查询条件和命名字段均由 YAML 配置提供。
 
 即使现场账号权限较大，程序本身也不会主动调用写入或删除接口。现场仍建议使用最小权限的只读账号。
 
@@ -45,7 +45,7 @@ aliyun-data-collector/
 默认可执行文件为：
 
 ```text
-target/aliyun-data-collector-0.1.0-SNAPSHOT.jar
+target/aliyun-data-collector-0.1.2-SNAPSHOT.jar
 ```
 
 ## 4. 运行环境
@@ -79,7 +79,7 @@ mvn clean package
 查看程序帮助：
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar --help
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar --help
 ```
 
 ## 5. 现场需要确认的信息
@@ -90,7 +90,9 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar --help
 
 - ARMS API Endpoint。
 - 使用 HTTP 还是 HTTPS。
-- RegionId。
+- ApiRegionId：API 网关/SDK 路由地域，例如 `bjdc-1`。
+- RegionId：ARMS 资源地域，作为接口查询参数发送，例如 `zj-3`。
+- 是否需要 `x-acs-organizationid` 和 `x-acs-resourcegroupid` 请求头。
 - API Version；专有云版本不能直接假设与公有云一致。
 - 应用 PID。
 - 使用 `QueryMetric` 还是 `QueryMetricByPage`。
@@ -157,7 +159,10 @@ arms:
   mode: "RPC"
   endpoint: "现场ARMS地址"
   protocol: "HTTP"
+  apiRegionId: "现场API路由地域"
   regionId: "现场RegionId"
+  organizationId: "现场组织ID；不要求时留空"
+  resourceGroupId: "现场资源组ID；不要求时留空"
   product: "ARMS"
   version: "现场API版本"
   accessKeyIdEnv: "ARMS_ACCESS_KEY_ID"
@@ -288,7 +293,7 @@ Test-Path Env:SLS_ACCESS_KEY_SECRET
 ### 10.1 `validate-config`：校验配置
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   validate-config --config config/site.yaml
 ```
 
@@ -305,7 +310,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
 ### 10.2 `probe`：最小权限与连通性探测
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   probe --config config/site.yaml
 ```
 
@@ -313,7 +318,8 @@ RPC 模式下，ARMS 调用 `ListTraceApps`；SLS 调用 `ListLogStores`。Datas
 
 如果失败，优先检查：
 
-- Endpoint、协议和 RegionId。
+- Endpoint、协议、ApiRegionId 和 RegionId。
+- 组织 ID、资源组 ID 是否与开发者门户成功请求一致。
 - AccessKey 是否在当前 PowerShell 中设置。
 - AccessKey 是否具有只读 API 权限。
 - 现场网络、DNS、防火墙或代理。
@@ -322,7 +328,7 @@ RPC 模式下，ARMS 调用 `ListTraceApps`；SLS 调用 `ListLogStores`。Datas
 ### 10.3 `discover`：发现现场资源
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   discover --config config/site.yaml
 ```
 
@@ -336,7 +342,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
 ### 10.4 `dry-run`：预演采集计划
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   dry-run --config config/site.yaml `
   --start 2026-07-27T09:00:00+08:00 `
   --end 2026-07-27T10:00:00+08:00
@@ -355,7 +361,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
 ### 10.5 `collect`：执行采集
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   collect --config config/site.yaml `
   --start 2026-07-27T09:00:00+08:00 `
   --end 2026-07-27T10:00:00+08:00
@@ -379,7 +385,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
 中断、断网或修复权限后，使用与原采集完全相同的配置、开始时间和结束时间：
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   resume --config config/site.yaml `
   --start 2026-07-27T09:00:00+08:00 `
   --end 2026-07-27T10:00:00+08:00
@@ -394,7 +400,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
 ### 10.7 `validate-output`：校验输出
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   validate-output --config config/site.yaml
 ```
 
@@ -412,7 +418,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
 ### 10.8 `build-manifest`：重建辅助清单
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   build-manifest --config config/site.yaml
 ```
 
@@ -447,9 +453,9 @@ manifest/manifest-rebuilt.json
 按顺序执行：
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar validate-config --config config/site.yaml
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar probe --config config/site.yaml
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar discover --config config/site.yaml
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar validate-config --config config/site.yaml
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar probe --config config/site.yaml
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar discover --config config/site.yaml
 ```
 
 根据 `discover` 输出修正 PID、Project 和 Logstore，再次执行 `validate-config`。
@@ -459,7 +465,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar discover --config conf
 先预演 10 分钟：
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   dry-run --config config/site.yaml `
   --start 2026-07-27T09:00:00+08:00 `
   --end 2026-07-27T09:10:00+08:00
@@ -468,7 +474,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
 确认无误后试采相同的短时间范围：
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar `
   collect --config config/site.yaml `
   --start 2026-07-27T09:00:00+08:00 `
   --end 2026-07-27T09:10:00+08:00
@@ -593,7 +599,7 @@ SLS SDK 会先解码响应，程序再包装为 JSON 信封，其中包含：
 在脚本中可以通过 `$LASTEXITCODE` 判断结果：
 
 ```powershell
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar validate-config --config config/site.yaml
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar validate-config --config config/site.yaml
 $LASTEXITCODE
 ```
 
@@ -670,6 +676,8 @@ $LASTEXITCODE
 
 - 以甲方提供的专有云文档和现场控制台为准，不直接套用公有云 Endpoint 或 API Version。
 - Apsara Stack 可能只开放 HTTP，应按现场协议配置，不擅自切换 HTTPS。
+- ApiRegionId 用于 SDK/网关路由，RegionId 用于目标资源查询；两者不能相互替代。
+- 现场文档要求组织/资源组时，程序分别发送 `x-acs-organizationid`、`x-acs-resourcegroupid` 请求头。
 - ARMS 指标数组按 RPC 形式编码为 `Measures.1`、`Filters.1.Key/Value` 等。
 - 不同 ARMS 版本的额外参数可以放入任务的 `parameters` 中透传。
 - SLS 查询依赖已有索引，程序不会为了采集而修改 Logstore 配置。
@@ -709,22 +717,22 @@ $env:SLS_ACCESS_KEY_ID='<现场值>'
 $env:SLS_ACCESS_KEY_SECRET='<现场值>'
 
 # 2. 校验配置
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar validate-config --config config/site.yaml
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar validate-config --config config/site.yaml
 
 # 3. 探测权限与网络
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar probe --config config/site.yaml
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar probe --config config/site.yaml
 
 # 4. 发现应用和 Logstore
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar discover --config config/site.yaml
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar discover --config config/site.yaml
 
 # 5. 预演正式时间范围
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar dry-run --config config/site.yaml --start 2026-07-27T09:00:00+08:00 --end 2026-07-27T10:00:00+08:00
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar dry-run --config config/site.yaml --start 2026-07-27T09:00:00+08:00 --end 2026-07-27T10:00:00+08:00
 
 # 6. 正式采集
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar collect --config config/site.yaml --start 2026-07-27T09:00:00+08:00 --end 2026-07-27T10:00:00+08:00
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar collect --config config/site.yaml --start 2026-07-27T09:00:00+08:00 --end 2026-07-27T10:00:00+08:00
 
 # 7. 校验输出
-java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar validate-output --config config/site.yaml
+java -jar target/aliyun-data-collector-0.1.2-SNAPSHOT.jar validate-output --config config/site.yaml
 ```
 
 如果第 6 步中断，保留全部输出，使用相同配置和时间范围把 `collect` 改为 `resume`。

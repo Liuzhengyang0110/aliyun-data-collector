@@ -3,5 +3,6 @@
 /.vscode/
 /data-package/
 /config/site.yaml
+/config/site.test.yaml
 *.partial
 *.log

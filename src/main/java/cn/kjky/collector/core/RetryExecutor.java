@@ -62,6 +62,9 @@ public final class RetryExecutor {
             int status = le.GetHttpCode();
             return status == 0 || status == 408 || status == 429 || status >= 500;
         }
+        // 阿里云核心 SDK 会把 HTTP 5xx 包装为 ServerException；其错误码可能是
+        // InternalError 等不含 "server" 关键词的值，因此必须先按异常类型判断。
+        if (e instanceof com.aliyuncs.exceptions.ServerException) return true;
         if (e instanceof com.aliyuncs.exceptions.ClientException) {
             com.aliyuncs.exceptions.ClientException ce = (com.aliyuncs.exceptions.ClientException) e;
             // code 是阿里云核心 SDK 的错误码，通过关键词识别暂时性错误。

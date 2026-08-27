@@ -62,6 +62,7 @@ public final class ConfigValidator {
         }
         if ("RPC".equalsIgnoreCase(a.mode)) {
             required(errors, "arms.endpoint", a.endpoint);
+            required(errors, "arms.apiRegionId", a.apiRegionId);
             required(errors, "arms.regionId", a.regionId);
             required(errors, "arms.product", a.product);
             required(errors, "arms.version", a.version);

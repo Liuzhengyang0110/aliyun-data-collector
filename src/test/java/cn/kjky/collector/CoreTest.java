@@ -31,6 +31,7 @@ class CoreTest {
         CollectorConfig c = base();
         c.arms.enabled = true;
         c.arms.endpoint = "arms.internal.example";
+        c.arms.apiRegionId = "api-test";
         c.arms.regionId = "cn-test";
         c.arms.version = "2019-08-08";
         CollectorConfig.TraceQuery q = new CollectorConfig.TraceQuery();

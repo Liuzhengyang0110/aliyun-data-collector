@@ -57,8 +57,14 @@ public class CollectorConfig {
         public String endpoint;
         /** RPC 请求协议：HTTP 或 HTTPS。 */
         public String protocol = "HTTP";
-        /** ARMS 地域标识。 */
+        /** 专有云 API 网关/SDK 路由地域，例如 bjdc-1。 */
+        public String apiRegionId;
+        /** ARMS 资源所在地域，作为接口查询参数 RegionId 发送，例如 zj-3。 */
         public String regionId;
+        /** 可选组织 ID；非空时写入 x-acs-organizationid 请求头。 */
+        public String organizationId;
+        /** 可选资源组 ID；非空时写入 x-acs-resourcegroupid 请求头。 */
+        public String resourceGroupId;
         /** RPC 产品名，通常为 ARMS。 */
         public String product = "ARMS";
         /** 现场 ARMS API 版本。 */
