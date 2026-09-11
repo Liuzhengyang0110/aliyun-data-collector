@@ -25,6 +25,8 @@ public final class OutputSession {
     private final CollectorConfig config;
     /** 规范化后的绝对输出根目录。 */
     private final Path root;
+    /** DEVELOPMENT 模式 raw 文件根目录。 */
+    private final Path rawRoot;
     /** 支持 Instant 的 JSON 序列化器。 */
     private final ObjectMapper json;
     /** 文件名生成器。 */
@@ -46,11 +48,16 @@ public final class OutputSession {
      * @throws IllegalStateException 输出目录属于其他项目或批次
      */
     public OutputSession(CollectorConfig config, Instant start, Instant end) throws IOException {
+        if (!config.rawPersistenceEnabled()) {
+            throw new IllegalStateException("raw 持久化已关闭；当前版本尚未完成 Outbox，禁止启动会丢失数据的采集流程");
+        }
         this.config = config;
-        this.root = Path.of(config.outputRoot).toAbsolutePath().normalize();
+        this.root = Path.of(config.effectiveDataRoot()).toAbsolutePath().normalize();
+        this.rawRoot = root.resolve(config.effectiveRawDirectory()).normalize();
+        if (!rawRoot.startsWith(root)) throw new SecurityException("raw 输出路径越界");
         this.json = new ObjectMapper().registerModule(new JavaTimeModule()).enable(SerializationFeature.INDENT_OUTPUT);
-        Files.createDirectories(root.resolve("raw/arms"));
-        Files.createDirectories(root.resolve("raw/sls"));
+        Files.createDirectories(rawRoot.resolve("arms"));
+        Files.createDirectories(rawRoot.resolve("sls"));
         Files.createDirectories(root.resolve("manifest"));
         Files.createDirectories(root.resolve("checkpoints"));
         Files.createDirectories(root.resolve("logs"));
@@ -101,9 +108,9 @@ public final class OutputSession {
         // part 是当前文件的新分片号。
         int part = parts.merge(key, 1, Integer::sum);
         String filename = naming.name(config, collectorId, recordType, window, part, "json");
-        // directory 只能位于 root/raw 下，startsWith 检查防止路径穿越。
-        Path directory = root.resolve("raw").resolve(collectorId).normalize();
-        if (!directory.startsWith(root.resolve("raw"))) throw new SecurityException("输出路径越界");
+        // directory 只能位于配置的 raw 根目录下，startsWith 检查防止路径穿越。
+        Path directory = rawRoot.resolve(collectorId).normalize();
+        if (!directory.startsWith(rawRoot)) throw new SecurityException("输出路径越界");
         Files.createDirectories(directory);
         // target 是正式文件，partial 是写入过程中的临时文件。
         Path target = directory.resolve(filename);
@@ -162,7 +169,7 @@ public final class OutputSession {
      * @param message 日志正文
      * @throws IOException 日志文件写入失败
      */
-    public void appendRunLog(String level, String message) throws IOException {
+    public synchronized void appendRunLog(String level, String message) throws IOException {
         // sanitized 去掉凭据关键词和换行，确保每条日志只占一行。
         String sanitized = safe(message).replace("\r", " ").replace("\n", " ");
         String line = Instant.now() + "\t" + level + "\t" + sanitized + System.lineSeparator();
@@ -176,6 +183,15 @@ public final class OutputSession {
     public ObjectMapper json() { return json; }
     /** @return 当前内存 manifest */
     public Manifest manifest() { return manifest; }
+
+    /** 扩展常驻会话覆盖的时间范围。 */
+    public synchronized void extendRange(Instant start, Instant end) {
+        if (manifest.collectionStart == null || start.isBefore(manifest.collectionStart)) manifest.collectionStart = start;
+        if (manifest.collectionEnd == null || end.isAfter(manifest.collectionEnd)) manifest.collectionEnd = end;
+    }
+
+    /** 返回当前正式文件数，避免并发采集时直接读取可变列表。 */
+    public synchronized int fileCount() { return manifest.files.size(); }
 
     /**
      * 对可能进入日志或 manifest 的文本执行基础凭据脱敏。

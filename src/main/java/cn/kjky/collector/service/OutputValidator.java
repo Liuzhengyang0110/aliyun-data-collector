@@ -23,6 +23,11 @@ public final class OutputValidator {
      * @throws IOException manifest、raw 目录或文件无法读取
      */
     public List<String> validate(Path root) throws IOException {
+        return validate(root, "raw");
+    }
+
+    /** 使用配置的 raw 相对目录校验开发采集包。 */
+    public List<String> validate(Path root, String rawDirectory) throws IOException {
         // errors 汇总全部问题，便于一次修复。
         List<String> errors = new ArrayList<>();
         // manifestFile 是正式清单位置。
@@ -44,7 +49,9 @@ public final class OutputValidator {
             if (!hashing.sha256(file).equalsIgnoreCase(entry.sha256)) errors.add("SHA-256 不符: " + entry.relativePath);
         }
         // stream 扫描所有 raw 子目录，发现中断遗留的 .partial 文件。
-        try (var stream = Files.walk(root.resolve("raw"))) {
+        Path rawRoot = root.resolve(rawDirectory).normalize();
+        if (!rawRoot.startsWith(root.normalize())) return List.of("raw 目录路径越界");
+        try (var stream = Files.walk(rawRoot)) {
             stream.filter(Files::isRegularFile).filter(p -> p.getFileName().toString().endsWith(".partial"))
                     .forEach(p -> errors.add("发现未完成文件: " + root.relativize(p)));
         }

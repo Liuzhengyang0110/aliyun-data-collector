@@ -6,15 +6,90 @@ envCode: "__REQUIRED_ON_SITE__"
 batchId: "__REQUIRED_ON_SITE__"
 caseId: "__REQUIRED_ON_SITE__"
 timezone: "Asia/Shanghai"
-outputRoot: "./data-package"
+
+collector:
+  collectorId: "__REQUIRED_ON_SITE__"
+  siteId: "__REQUIRED_ON_SITE__"
+  collectorType: "ALIYUN"
 
 runtime:
+  # 开发阶段使用 DEVELOPMENT；生产配置改为 PRODUCTION 并关闭 rawPersistence。
+  deploymentMode: "DEVELOPMENT"
   windowSeconds: 600
   requestTimeoutSeconds: 30
   maxRetries: 3
   retryBaseMillis: 500
   maxPollAttempts: 10
   pollIntervalMillis: 1000
+
+# daemon 命令使用的数据源周期轮询配置。runtime.pollIntervalMillis 仅用于
+# 单次 SLS 查询尚未完成时的状态轮询，两者含义不同。
+scheduler:
+  jitterSeconds: 3
+  shutdownGraceSeconds: 60
+  # 补偿调度将在稳定 event_id 去重完成后启用；本阶段先冻结参数。
+  compensationIntervalSeconds: 600
+  compensationLookbackSeconds: 1800
+  arms:
+    pollIntervalSeconds: 30
+    visibilityDelaySeconds: 90
+    initialLookbackSeconds: 300
+  sls:
+    pollIntervalSeconds: 20
+    visibilityDelaySeconds: 30
+    initialLookbackSeconds: 120
+
+# BatchUploader 已接入 daemon 独立上传循环；启用上传后 ingestUrl 必填。
+upload:
+  enabled: false
+  ingestUrl: null
+  maxRecords: 1000
+  maxCompressedBytes: 2097152
+  maxRequestBytes: 10485760
+  maxWaitMillis: 5000
+  maxInFlightBatches: 2
+  connectTimeoutSeconds: 10
+  requestTimeoutSeconds: 30
+  retryInitialDelayMillis: 1000
+  retryMaxDelayMillis: 60000
+  retryJitterRatio: 0.2
+  retryWarningAttempts: 10
+
+# mTLS 支持 PEM 和 KEYSTORE 两种客户端身份模式，密码只写环境变量名。
+security:
+  mtlsEnabled: false
+  clientAuthMode: "KEYSTORE"
+  clientCertificatePath: null
+  privateKeyPath: null
+  keyStorePath: null
+  keyStoreType: "PKCS12"
+  keyStorePasswordEnv: null
+  trustStorePath: null
+  trustStoreType: "PKCS12"
+  trustStorePasswordEnv: null
+  certificateExpiryWarningDays: 30
+  certificateReloadIntervalSeconds: 30
+
+storage:
+  dataRoot: "./data-package"
+  outboxDir: "outbox"
+  stateDir: "state"
+  rawPersistence:
+    # 生产模式必须为 false；当前 Outbox 未完成前，关闭后会安全拒绝采集。
+    enabled: true
+    directory: "raw"
+  diskWarningWatermarkPercent: 80
+  diskCriticalWatermarkPercent: 90
+  diskResumeWatermarkPercent: 75
+  diskCheckIntervalSeconds: 10
+
+# 中控任务领取和心跳将在控制功能阶段启用。
+control:
+  enabled: false
+  taskClaimUrl: null
+  heartbeatIntervalSeconds: 30
+  taskPollIntervalSeconds: 10
+  requestTimeoutSeconds: 30
 
 arms:
   enabled: true
@@ -41,6 +116,10 @@ arms:
       maxDuration: null
       # 现场文档出现额外查询参数时在此透传。
       parameters: {}
+      normalization:
+        # 留空时使用内置 ARMS Trace 安全字段；现场确认后可显式收紧。
+        payloadFields: []
+        identityFields: ["TraceID"]
   metricQueries:
     - name: "service-metric"
       recordType: "flow_feature"
@@ -60,6 +139,10 @@ arms:
       # 常规数组会按 RPC 规范编码为 Measures.1、Filters.1.Key/Value 等；
       # 如 Apsara Stack 版本有额外字段，可在这里直接补充。
       parameters: {}
+      normalization:
+        # 建议把 measures、dimensions 以及事件时间字段明确列入准入清单。
+        payloadFields: ["timestamp", "value", "metric", "dimensions"]
+        identityFields: []
   dataset:
     url: "__REQUIRED_ON_SITE__"
     usernameEnv: "ARMS_DATASET_USERNAME"
@@ -82,3 +165,7 @@ sls:
           query: ""
           pageSize: 100
           reverse: false
+          normalization:
+            # SLS 字段由现场定义；生产前必须按数据分级要求调整准入字段。
+            payloadFields: ["message", "method", "path", "status", "duration", "trace_id", "service_id"]
+            identityFields: ["request_id"]

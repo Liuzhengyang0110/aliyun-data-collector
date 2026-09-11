@@ -34,8 +34,9 @@ public final class ManifestRebuilder {
      * @throws IOException 目录扫描、文件读取、哈希或 JSON 写入失败
      */
     public Path rebuild(CollectorConfig c) throws IOException {
+        if (!c.rawPersistenceEnabled()) throw new IllegalStateException("raw 持久化关闭时不能重建 manifest");
         // root 是规范化输出根目录；m 是待构建的新清单。
-        Path root = Path.of(c.outputRoot).toAbsolutePath().normalize();
+        Path root = Path.of(c.effectiveDataRoot()).toAbsolutePath().normalize();
         Manifest m = new Manifest();
         m.schemaVersion = c.schemaVersion;
         m.projectCode = c.projectCode;
@@ -47,7 +48,8 @@ public final class ManifestRebuilder {
         m.collectorVersion = "0.1.0-rebuilt";
         Hashing hashing = new Hashing();
         // raw 是扫描起点，仅处理其中的 .json 正式文件。
-        Path raw = root.resolve("raw");
+        Path raw = root.resolve(c.effectiveRawDirectory()).normalize();
+        if (!raw.startsWith(root)) throw new SecurityException("raw 扫描路径越界");
         if (Files.isDirectory(raw)) try (var paths = Files.walk(raw)) {
             paths.filter(Files::isRegularFile).filter(p -> p.getFileName().toString().endsWith(".json")).sorted().forEach(p -> {
                 try {

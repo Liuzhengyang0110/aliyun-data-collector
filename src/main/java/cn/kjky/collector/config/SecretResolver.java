@@ -20,6 +20,15 @@ public final class SecretResolver {
     }
 
     /**
+     * 以可擦除字符数组读取密码类 Secret。调用方使用后应立即用零覆盖返回值，
+     * 避免为了 KeyStore/TrustStore 密码额外创建长期存活的字符串副本。
+     */
+    public char[] requiredChars(String envName) {
+        String value = required(envName);
+        return value.toCharArray();
+    }
+
+    /**
      * 读取可选环境变量。
      *
      * @param envName 环境变量名；为空时表示不启用该可选凭据

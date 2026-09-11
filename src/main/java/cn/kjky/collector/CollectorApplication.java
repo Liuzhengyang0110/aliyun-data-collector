@@ -6,6 +6,7 @@ import cn.kjky.collector.config.ConfigValidator;
 import cn.kjky.collector.service.CollectorEngine;
 import cn.kjky.collector.service.ManifestRebuilder;
 import cn.kjky.collector.service.OutputValidator;
+import cn.kjky.collector.runtime.CollectorDaemon;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -58,7 +59,7 @@ public final class CollectorApplication {
             // config 是 YAML 反序列化后的完整运行配置，后续服务只使用这个对象。
             CollectorConfig config = new ConfigLoader().load(Path.of(configPath));
             // 只有实际访问 API 的命令才要求当前进程已设置凭据环境变量。
-            boolean requireSecrets = List.of("probe", "discover", "collect", "resume").contains(command);
+            boolean requireSecrets = List.of("probe", "discover", "collect", "resume", "daemon").contains(command);
             List<String> errors = new ConfigValidator().validate(config, requireSecrets);
             if (!errors.isEmpty()) {
                 System.err.println("配置校验失败:");
@@ -72,18 +73,27 @@ public final class CollectorApplication {
                 case "probe" -> { System.out.println(engine.probe()); yield 0; }
                 case "discover" -> { System.out.println(engine.discover()); yield 0; }
                 case "dry-run" -> { var range = range(options); System.out.println(engine.dryRun(range[0], range[1])); yield 0; }
-                case "collect", "resume" -> { var range = range(options); engine.collect(range[0], range[1]); System.out.println("采集完成: " + Path.of(config.outputRoot).toAbsolutePath().normalize()); yield 0; }
+                case "collect", "resume" -> { var range = range(options); engine.collect(range[0], range[1]); System.out.println("采集完成: " + Path.of(config.effectiveDataRoot()).toAbsolutePath().normalize()); yield 0; }
+                case "daemon" -> { new CollectorDaemon(config, engine).runBlocking(); yield 0; }
                 case "validate-output" -> {
-                    var validation = new OutputValidator().validate(Path.of(config.outputRoot).toAbsolutePath().normalize());
+                    requireRawPersistence(config, command);
+                    var validation = new OutputValidator().validate(Path.of(config.effectiveDataRoot()).toAbsolutePath().normalize(), config.effectiveRawDirectory());
                     if (validation.isEmpty()) { System.out.println("输出校验通过"); yield 0; }
                     validation.forEach(e -> System.err.println("- " + e)); yield 3;
                 }
-                case "build-manifest" -> { System.out.println("已生成: " + new ManifestRebuilder().rebuild(config)); yield 0; }
+                case "build-manifest" -> { requireRawPersistence(config, command); System.out.println("已生成: " + new ManifestRebuilder().rebuild(config)); yield 0; }
                 default -> throw new IllegalArgumentException("未知命令: " + command);
             };
         } catch (Exception e) {
             System.err.println("执行失败: " + safe(e));
             return 1;
+        }
+    }
+
+    /** 输出校验和 manifest 重建只适用于开发 raw 包。 */
+    private static void requireRawPersistence(CollectorConfig config, String command) {
+        if (!config.rawPersistenceEnabled()) {
+            throw new IllegalStateException(command + " 当前依赖 raw 输出；请使用开启 rawPersistence 的 DEVELOPMENT 配置");
         }
     }
 
@@ -162,6 +172,7 @@ public final class CollectorApplication {
                   dry-run          展示分窗和采集任务，不访问 API
                   collect          执行采集
                   resume           按 checkpoint 断点续采
+                  daemon           常驻运行，独立轮询 ARMS 和 SLS
                   validate-output  校验文件存在性、大小和 SHA-256
                   build-manifest   从 raw 文件重建辅助 manifest
                 """);

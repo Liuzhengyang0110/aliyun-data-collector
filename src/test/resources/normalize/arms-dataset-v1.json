@@ -1,0 +1,10 @@
+{
+  "rows": [
+    {
+      "service_name": "inventory-service",
+      "values": [3, 5, 8],
+      "dimensions": {"cluster": "cluster-a"},
+      "future_field": "synthetic-future-value"
+    }
+  ]
+}

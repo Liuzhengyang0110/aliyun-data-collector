@@ -11,6 +11,11 @@ import cn.kjky.collector.core.TimeWindow;
 import cn.kjky.collector.core.WindowPlanner;
 import cn.kjky.collector.output.CheckpointStore;
 import cn.kjky.collector.output.OutputSession;
+import cn.kjky.collector.outbox.OutboxStore;
+import cn.kjky.collector.pipeline.CollectionTask;
+import cn.kjky.collector.pipeline.ProductionEventSink;
+import cn.kjky.collector.runtime.CollectionWatermarkStore;
+import cn.kjky.collector.runtime.CollectionSource;
 import cn.kjky.collector.sls.SlsApi;
 import cn.kjky.collector.sls.SlsCollector;
 import cn.kjky.collector.sls.SlsSdkApi;
@@ -36,6 +41,18 @@ public final class CollectorEngine {
     private final SecretResolver secrets = new SecretResolver();
     /** 用于命令行输出格式化 JSON。 */
     private final ObjectMapper json = new ObjectMapper().registerModule(new JavaTimeModule()).enable(SerializationFeature.INDENT_OUTPUT);
+    /** 常驻 ARMS/SLS 共享输出状态的初始化锁。 */
+    private final Object daemonSessionLock = new Object();
+    /** 生产模式的 Outbox、任务级水位和事件管道初始化锁。 */
+    private final Object productionPipelineLock = new Object();
+    /** 常驻模式共享会话，避免两个数据源各自恢复并覆盖同一 manifest。 */
+    private OutputSession daemonOutput;
+    /** 常驻模式共享页面级 checkpoint。 */
+    private CheckpointStore daemonCheckpoint;
+    /** 仅 raw 关闭的生产采集路径使用；延迟创建避免只读命令触碰 PVC。 */
+    private ProductionPipeline productionPipeline;
+    /** daemon 的采集和上传循环必须共享同一实例，保证进程内批次认领互斥。 */
+    private OutboxStore daemonOutbox;
 
     /**
      * 根据运行配置创建编排器。
@@ -123,7 +140,7 @@ public final class CollectorEngine {
         plan.put("armsMetricTasks", config.arms.metricQueries.stream().map(q -> q.name).toList());
         plan.put("armsDatasetTasks", config.arms.dataset.queries.stream().map(q -> q.name).toList());
         plan.put("slsLogstores", config.sls.projects.stream().flatMap(p -> p.logstores.stream().map(l -> p.project + "/" + l.logstore)).toList());
-        plan.put("outputRoot", java.nio.file.Path.of(config.outputRoot).toAbsolutePath().normalize().toString());
+        plan.put("outputRoot", java.nio.file.Path.of(config.effectiveDataRoot()).toAbsolutePath().normalize().toString());
         return json.writeValueAsString(plan);
     }
 
@@ -135,15 +152,67 @@ public final class CollectorEngine {
      * @param end 整体采集结束时刻
      * @throws Exception 任一窗口查询、落盘或清单更新失败
      */
-    public void collect(Instant start, Instant end) throws Exception {
-        // windows 决定执行顺序；当前实现按时间串行，减少现场接口压力。
-        List<TimeWindow> windows = new WindowPlanner().split(start, end, config.runtime.windowSeconds);
-        // output 会恢复已有 manifest；checkpoint 会恢复已完成请求。
+    public synchronized void collect(Instant start, Instant end) throws Exception {
+        if (!config.rawPersistenceEnabled()) {
+            collectProductionRange(start, end);
+            return;
+        }
         OutputSession output = new OutputSession(config, start, end);
         CheckpointStore checkpoint = new CheckpointStore(output.root(), output.json());
+        collectSelected(start, end, config.arms.enabled, config.sls.enabled, output, checkpoint);
+    }
+
+    /**
+     * 只采集指定数据源，供 ARMS/SLS 独立常驻调度器调用。
+     * 两个数据源共享线程安全的输出会话和 checkpoint，但 API 查询可以并行执行，
+     * 避免较慢的 ARMS 查询长期阻塞 SLS 的轮询周期。
+     */
+    public void collectSource(CollectionSource source, Instant start, Instant end) throws Exception {
+        if (source == CollectionSource.ARMS && !config.arms.enabled) throw new IllegalStateException("ARMS 未启用");
+        if (source == CollectionSource.SLS && !config.sls.enabled) throw new IllegalStateException("SLS 未启用");
+        if (!config.rawPersistenceEnabled()) {
+            collectProductionSourceRange(source, start, end);
+            return;
+        }
+        DaemonSession session = daemonSession(start, end);
+        collectSelected(start, end, source == CollectionSource.ARMS, source == CollectionSource.SLS,
+                session.output(), session.checkpoint());
+    }
+
+    /**
+     * 生产 daemon 按任务独立水位执行一个数据源轮询。
+     * 任务首次起点由 CollectionWatermarkStore 固定，之后只有 pending 批次全部就绪才会前进。
+     */
+    public void collectProductionSource(CollectionSource source, Instant queryEnd,
+                                        int initialLookbackSeconds) throws Exception {
+        if (config.rawPersistenceEnabled()) {
+            throw new IllegalStateException("开发 raw 模式不应使用生产任务级轮询");
+        }
+        if (initialLookbackSeconds < 1) throw new IllegalArgumentException("initialLookbackSeconds 必须大于 0");
+        ProductionPipeline pipeline = productionPipeline();
+        if (source == CollectionSource.ARMS) collectProductionArmsFromWatermarks(pipeline, queryEnd, initialLookbackSeconds);
+        else collectProductionSlsFromWatermarks(pipeline, queryEnd, initialLookbackSeconds);
+    }
+
+    /**
+     * 返回 daemon 采集与上传共用的 Outbox。上传循环不得自行创建第二个 Store，
+     * 否则两个实例各自维护的认领集合无法保证同一进程内互斥。
+     */
+    public OutboxStore daemonOutbox() throws Exception {
+        synchronized (productionPipelineLock) {
+            if (daemonOutbox == null) daemonOutbox = new OutboxStore(config);
+            return daemonOutbox;
+        }
+    }
+
+    /** 执行选择后的数据源集合，只有全部窗口成功才正常返回。 */
+    private void collectSelected(Instant start, Instant end, boolean collectArms, boolean collectSls,
+                                 OutputSession output, CheckpointStore checkpoint) throws Exception {
+        // windows 决定执行顺序；当前实现按时间串行，减少现场接口压力。
+        List<TimeWindow> windows = new WindowPlanner().split(start, end, config.runtime.windowSeconds);
         output.appendRunLog("INFO", "开始采集，窗口数=" + windows.size());
-        try (ArmsApi arms = config.arms.enabled ? armsApi() : null;
-             SlsApi sls = config.sls.enabled ? new SlsSdkApi(config.sls, secrets) : null) {
+        try (ArmsApi arms = collectArms ? armsApi() : null;
+             SlsApi sls = collectSls ? new SlsSdkApi(config.sls, secrets) : null) {
             // 未启用的数据源对应采集器为 null，窗口循环中直接跳过。
             ArmsCollector armsCollector = arms == null ? null : new ArmsCollector(config, arms, retry, output, checkpoint);
             SlsCollector slsCollector = sls == null ? null : new SlsCollector(config, sls, retry, output, checkpoint);
@@ -160,9 +229,149 @@ public final class CollectorEngine {
                 }
             }
             output.saveManifest();
-            output.appendRunLog("INFO", "采集完成，文件数=" + output.manifest().files.size());
+            output.appendRunLog("INFO", "采集完成，文件数=" + output.fileCount());
         }
     }
+
+    /** 执行手动 production collect/resume 指定的时间范围，不读取旧页面 checkpoint。 */
+    private void collectProductionRange(Instant start, Instant end) throws Exception {
+        ProductionPipeline pipeline = productionPipeline();
+        if (config.arms.enabled) collectProductionArms(pipeline, start, end);
+        if (config.sls.enabled) collectProductionSls(pipeline, start, end);
+    }
+
+    /** 供兼容 SourceCollector 接口的生产路径使用；start/end 已由调用方决定。 */
+    private void collectProductionSourceRange(CollectionSource source, Instant start, Instant end) throws Exception {
+        ProductionPipeline pipeline = productionPipeline();
+        if (source == CollectionSource.ARMS) collectProductionArms(pipeline, start, end);
+        else collectProductionSls(pipeline, start, end);
+    }
+
+    /** 在指定范围运行所有 ARMS 任务。 */
+    private void collectProductionArms(ProductionPipeline pipeline, Instant start, Instant end) throws Exception {
+        try (ArmsApi api = armsApi()) {
+            ArmsCollector collector = new ArmsCollector(config, api, retry, null, null, pipeline.sink());
+            if ("DATASET".equalsIgnoreCase(config.arms.mode)) {
+                for (var query : config.arms.dataset.queries) {
+                    runProductionTask(CollectionTask.armsDatasetKey(query.name), start, end,
+                            window -> collector.collectDatasetTask(query, window));
+                }
+            } else {
+                for (var query : config.arms.traceQueries) {
+                    runProductionTask(CollectionTask.armsTraceKey(query.name), start, end,
+                            window -> collector.collectTraceTask(query, window));
+                }
+                for (var query : config.arms.metricQueries) {
+                    runProductionTask(CollectionTask.armsMetricKey(query.name), start, end,
+                            window -> collector.collectMetricTask(query, window));
+                }
+            }
+        }
+    }
+
+    /** 在指定范围运行所有 SLS Project/Logstore 任务。 */
+    private void collectProductionSls(ProductionPipeline pipeline, Instant start, Instant end) throws Exception {
+        try (SlsApi api = new SlsSdkApi(config.sls, secrets)) {
+            SlsCollector collector = new SlsCollector(config, api, retry, null, null, pipeline.sink());
+            for (var project : config.sls.projects) {
+                for (var logstore : project.logstores) {
+                    runProductionTask(CollectionTask.slsLogKey(project.project, logstore.logstore), start, end,
+                            window -> collector.collectLogstoreTask(project.project, logstore, window));
+                }
+            }
+        }
+    }
+
+    /** 根据各自 CollectionWatermarkStore 中的起点运行 ARMS 任务。 */
+    private void collectProductionArmsFromWatermarks(ProductionPipeline pipeline, Instant end,
+                                                      int initialLookbackSeconds) throws Exception {
+        try (ArmsApi api = armsApi()) {
+            ArmsCollector collector = new ArmsCollector(config, api, retry, null, null, pipeline.sink());
+            if ("DATASET".equalsIgnoreCase(config.arms.mode)) {
+                for (var query : config.arms.dataset.queries) {
+                    runProductionTaskFromWatermark(pipeline, CollectionTask.armsDatasetKey(query.name), end,
+                            initialLookbackSeconds, window -> collector.collectDatasetTask(query, window));
+                }
+            } else {
+                for (var query : config.arms.traceQueries) {
+                    runProductionTaskFromWatermark(pipeline, CollectionTask.armsTraceKey(query.name), end,
+                            initialLookbackSeconds, window -> collector.collectTraceTask(query, window));
+                }
+                for (var query : config.arms.metricQueries) {
+                    runProductionTaskFromWatermark(pipeline, CollectionTask.armsMetricKey(query.name), end,
+                            initialLookbackSeconds, window -> collector.collectMetricTask(query, window));
+                }
+            }
+        }
+    }
+
+    /** 根据各自 CollectionWatermarkStore 中的起点运行 SLS 任务。 */
+    private void collectProductionSlsFromWatermarks(ProductionPipeline pipeline, Instant end,
+                                                     int initialLookbackSeconds) throws Exception {
+        try (SlsApi api = new SlsSdkApi(config.sls, secrets)) {
+            SlsCollector collector = new SlsCollector(config, api, retry, null, null, pipeline.sink());
+            for (var project : config.sls.projects) {
+                for (var logstore : project.logstores) {
+                    runProductionTaskFromWatermark(pipeline, CollectionTask.slsLogKey(project.project, logstore.logstore), end,
+                            initialLookbackSeconds, window -> collector.collectLogstoreTask(project.project, logstore, window));
+                }
+            }
+        }
+    }
+
+    /** 对一个任务执行指定范围内的逻辑窗口。 */
+    private void runProductionTask(String taskKey, Instant start, Instant end,
+                                   ProductionTaskCollector collector) throws Exception {
+        if (!start.isBefore(end)) return;
+        for (TimeWindow window : new WindowPlanner().split(start, end, config.runtime.windowSeconds)) collector.collect(window);
+    }
+
+    /** 首轮先锚定任务起点，随后按同一任务的最新成功窗口继续。 */
+    private void runProductionTaskFromWatermark(ProductionPipeline pipeline, String taskKey, Instant end,
+                                                int initialLookbackSeconds,
+                                                ProductionTaskCollector collector) throws Exception {
+        Instant start = pipeline.watermarks().startFor(taskKey, end.minusSeconds(initialLookbackSeconds));
+        runProductionTask(taskKey, start, end, collector);
+    }
+
+    /** 延迟创建生产 Outbox 和水位；所有写入均位于 dataRoot/outbox 与 dataRoot/state。 */
+    private ProductionPipeline productionPipeline() throws Exception {
+        synchronized (productionPipelineLock) {
+            if (productionPipeline == null) {
+                OutboxStore outbox = daemonOutbox();
+                CollectionWatermarkStore watermarks = new CollectionWatermarkStore(
+                        outbox.stateRoot().resolve("collection-watermarks.json"));
+                productionPipeline = new ProductionPipeline(outbox, watermarks,
+                        new ProductionEventSink(config, outbox, watermarks));
+            }
+            return productionPipeline;
+        }
+    }
+
+    @FunctionalInterface
+    private interface ProductionTaskCollector {
+        void collect(TimeWindow window) throws Exception;
+    }
+
+    /** 已初始化的生产持久化组件；上传端尚未读取这些 pending 批次。 */
+    private record ProductionPipeline(OutboxStore outbox, CollectionWatermarkStore watermarks,
+                                      ProductionEventSink sink) {}
+
+    /** 创建或复用常驻模式共享输出会话。 */
+    private DaemonSession daemonSession(Instant start, Instant end) throws Exception {
+        synchronized (daemonSessionLock) {
+            if (daemonOutput == null) {
+                daemonOutput = new OutputSession(config, start, end);
+                daemonCheckpoint = new CheckpointStore(daemonOutput.root(), daemonOutput.json());
+            } else {
+                daemonOutput.extendRange(start, end);
+            }
+            return new DaemonSession(daemonOutput, daemonCheckpoint);
+        }
+    }
+
+    /** 常驻模式下必须成对共享的输出对象。 */
+    private record DaemonSession(OutputSession output, CheckpointStore checkpoint) {}
 
     /**
      * 根据 arms.mode 创建对应 API 实现。

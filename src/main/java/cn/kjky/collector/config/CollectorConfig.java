@@ -22,17 +22,68 @@ public class CollectorConfig {
     public String caseId;
     /** 现场解释时间时使用的时区名称。 */
     public String timezone = "Asia/Shanghai";
-    /** 所有 raw、manifest、checkpoint 和日志的根目录。 */
-    public String outputRoot = "./data-package";
+    /** 兼容旧配置的输出根目录；新配置使用 storage.dataRoot。 */
+    public String outputRoot;
+    /** 采集端身份，用于后续上传、心跳和任务领取。 */
+    public CollectorIdentityConfig collector = new CollectorIdentityConfig();
     /** 通用运行参数。 */
     public RuntimeConfig runtime = new RuntimeConfig();
+    /** 常驻模式下的数据源轮询调度参数。 */
+    public SchedulerConfig scheduler = new SchedulerConfig();
+    /** 向 cc-ingest 主动上传时使用的参数。 */
+    public UploadConfig upload = new UploadConfig();
+    /** 中控通信的 TLS 与客户端身份参数。 */
+    public SecurityConfig security = new SecurityConfig();
+    /** 本地数据、Outbox 和保留策略。 */
+    public StorageConfig storage = new StorageConfig();
+    /** 主动领取中控任务和发送心跳的参数。 */
+    public ControlConfig control = new ControlConfig();
     /** ARMS 数据源参数。 */
     public ArmsConfig arms = new ArmsConfig();
     /** SLS 数据源参数。 */
     public SlsConfig sls = new SlsConfig();
 
+    /** 返回当前配置实际使用的数据根目录，并兼容旧 outputRoot。 */
+    public String effectiveDataRoot() {
+        if (storage != null && storage.dataRoot != null && !storage.dataRoot.isBlank()) return storage.dataRoot;
+        if (outputRoot != null && !outputRoot.isBlank()) return outputRoot;
+        return "./data-package";
+    }
+
+    /** 返回开发模式 raw 相对于数据根目录的目录。 */
+    public String effectiveRawDirectory() {
+        if (storage != null && storage.rawPersistence != null
+                && storage.rawPersistence.directory != null && !storage.rawPersistence.directory.isBlank()) {
+            return storage.rawPersistence.directory;
+        }
+        return "raw";
+    }
+
+    /** 返回水位等常驻状态相对于数据根目录的目录。 */
+    public String effectiveStateDirectory() {
+        if (storage != null && storage.stateDir != null && !storage.stateDir.isBlank()) return storage.stateDir;
+        return "state";
+    }
+
+    /** 当前配置是否允许保存开发调试用 raw 文件。 */
+    public boolean rawPersistenceEnabled() {
+        return storage != null && storage.rawPersistence != null && storage.rawPersistence.enabled;
+    }
+
+    /** 采集端在中控中的稳定身份。 */
+    public static class CollectorIdentityConfig {
+        /** 采集实例唯一标识。 */
+        public String collectorId;
+        /** 现场或集群站点标识。 */
+        public String siteId;
+        /** 采集器类型；本项目固定为 ALIYUN。 */
+        public String collectorType = "ALIYUN";
+    }
+
     /** 控制时间分窗、超时、重试和轮询行为的参数。 */
     public static class RuntimeConfig {
+        /** 部署模式：DEVELOPMENT 保留调试能力，PRODUCTION 执行生产安全约束。 */
+        public String deploymentMode = "DEVELOPMENT";
         /** 单个逻辑采集窗口的秒数。 */
         public int windowSeconds = 600;
         /** HTTP 建连和请求的超时秒数。 */
@@ -45,6 +96,142 @@ public class CollectorConfig {
         public int maxPollAttempts = 10;
         /** 两次 SLS 轮询之间的等待毫秒数。 */
         public long pollIntervalMillis = 1000;
+    }
+
+    /** 常驻模式的公共调度参数和各数据源调度参数。 */
+    public static class SchedulerConfig {
+        /** 每轮调度允许的正负随机抖动秒数。 */
+        public int jitterSeconds = 3;
+        /** 停止时等待正在执行的采集安全结束的最长秒数。 */
+        public int shutdownGraceSeconds = 60;
+        /** 补偿查询的执行间隔秒数。 */
+        public int compensationIntervalSeconds = 600;
+        /** 每次补偿向前回看的秒数。 */
+        public int compensationLookbackSeconds = 1800;
+        /** ARMS 的轮询参数。 */
+        public SourceScheduleConfig arms = new SourceScheduleConfig(30, 90, 300);
+        /** SLS 的轮询参数。 */
+        public SourceScheduleConfig sls = new SourceScheduleConfig(20, 30, 120);
+    }
+
+    /** 批量上传到 cc-ingest 的边界参数。 */
+    public static class UploadConfig {
+        /** 是否启用主动上传；当前阶段默认关闭。 */
+        public boolean enabled;
+        /** cc-ingest 批量接口完整 URL。 */
+        public String ingestUrl;
+        /** 单批最大事件数。 */
+        public int maxRecords = 1000;
+        /** 单批 gzip 后最大字节数。 */
+        public long maxCompressedBytes = 2L * 1024 * 1024;
+        /** 单批 gzip 前 JSON 允许的最大字节数，避免中控解压后超限。 */
+        public long maxRequestBytes = 10L * 1024 * 1024;
+        /** 最早事件在组批器中的最大等待毫秒数。 */
+        public long maxWaitMillis = 5000;
+        /** 同时允许上传的批次数。 */
+        public int maxInFlightBatches = 2;
+        /** 建立连接的超时秒数。 */
+        public int connectTimeoutSeconds = 10;
+        /** 完整上传请求的超时秒数。 */
+        public int requestTimeoutSeconds = 30;
+        /** 可重试失败的首次退避毫秒数。 */
+        public long retryInitialDelayMillis = 1000;
+        /** 指数退避允许达到的最大毫秒数。 */
+        public long retryMaxDelayMillis = 60000;
+        /** 退避随机抖动比例，0.2 表示在计算值上下 20% 内随机。 */
+        public double retryJitterRatio = 0.2d;
+        /** 单批达到该尝试次数时产生告警，但仍继续保留并重试。 */
+        public int retryWarningAttempts = 10;
+    }
+
+    /** mTLS 客户端证书、私钥或 KeyStore/TrustStore 配置。 */
+    public static class SecurityConfig {
+        /** 是否启用 mTLS。 */
+        public boolean mtlsEnabled;
+        /** 客户端身份模式：PEM 或 KEYSTORE。 */
+        public String clientAuthMode = "KEYSTORE";
+        /** PEM 模式客户端证书路径。 */
+        public String clientCertificatePath;
+        /** PEM 模式私钥路径。 */
+        public String privateKeyPath;
+        /** KEYSTORE 模式客户端 KeyStore 路径。 */
+        public String keyStorePath;
+        /** KeyStore 类型：PKCS12 或 JKS。 */
+        public String keyStoreType = "PKCS12";
+        /** 保存 KeyStore 密码的环境变量名。 */
+        public String keyStorePasswordEnv;
+        /** 服务端信任库路径。 */
+        public String trustStorePath;
+        /** TrustStore 类型：PKCS12 或 JKS。 */
+        public String trustStoreType = "PKCS12";
+        /** 保存 TrustStore 密码的环境变量名。 */
+        public String trustStorePasswordEnv;
+        /** 客户端证书剩余有效期小于等于该天数时产生告警。 */
+        public int certificateExpiryWarningDays = 30;
+        /** 检查 Secret Volume 文件更新和证书有效期的周期秒数。 */
+        public int certificateReloadIntervalSeconds = 30;
+    }
+
+    /** 数据根目录、Outbox、状态目录和磁盘保护策略。 */
+    public static class StorageConfig {
+        /** 开发输出或生产 Outbox/状态文件的数据根目录。 */
+        public String dataRoot;
+        /** 相对于 dataRoot 的 Outbox 目录。 */
+        public String outboxDir = "outbox";
+        /** 相对于 dataRoot 的采集水位和上传水位目录。 */
+        public String stateDir = "state";
+        /** 开发模式 raw 持久化配置。 */
+        public RawPersistenceConfig rawPersistence = new RawPersistenceConfig();
+        /** 达到该磁盘使用百分比后告警并抑制非必要补偿。 */
+        public int diskWarningWatermarkPercent = 80;
+        /** 达到该磁盘使用百分比后暂停创建新批次。 */
+        public int diskCriticalWatermarkPercent = 90;
+        /** 容量从临界状态下降到该百分比后恢复采集。 */
+        public int diskResumeWatermarkPercent = 75;
+        /** Outbox/PVC 容量检查周期，单位为秒。 */
+        public int diskCheckIntervalSeconds = 10;
+    }
+
+    /** 开发阶段可选的原始响应落盘策略。 */
+    public static class RawPersistenceConfig {
+        /** DEVELOPMENT 默认开启；PRODUCTION 必须关闭。 */
+        public boolean enabled = true;
+        /** 相对于 dataRoot 的 raw 目录。 */
+        public String directory = "raw";
+    }
+
+    /** 主动领取任务和上报心跳的配置。 */
+    public static class ControlConfig {
+        /** 是否启用中控任务与心跳。 */
+        public boolean enabled;
+        /** 领取任务的完整 URL。 */
+        public String taskClaimUrl;
+        /** 心跳间隔秒数。 */
+        public int heartbeatIntervalSeconds = 30;
+        /** 任务轮询间隔秒数。 */
+        public int taskPollIntervalSeconds = 10;
+        /** 控制请求超时秒数。 */
+        public int requestTimeoutSeconds = 30;
+    }
+
+    /** 单个数据源的轮询频率、数据可见性延迟和首次回看范围。 */
+    public static class SourceScheduleConfig {
+        /** 两轮采集之间的基础间隔秒数。 */
+        public int pollIntervalSeconds;
+        /** 查询终点相对当前时间向前偏移的秒数。 */
+        public int visibilityDelaySeconds;
+        /** 没有历史水位时首次采集向前回看的秒数。 */
+        public int initialLookbackSeconds;
+
+        /** 供 YAML 反序列化使用。 */
+        public SourceScheduleConfig() {}
+
+        /** 创建带默认值的数据源调度配置。 */
+        public SourceScheduleConfig(int pollIntervalSeconds, int visibilityDelaySeconds, int initialLookbackSeconds) {
+            this.pollIntervalSeconds = pollIntervalSeconds;
+            this.visibilityDelaySeconds = visibilityDelaySeconds;
+            this.initialLookbackSeconds = initialLookbackSeconds;
+        }
     }
 
     /** ARMS RPC 或 Dataset 采集配置。 */
@@ -99,6 +286,8 @@ public class CollectorConfig {
         public Long maxDuration;
         /** 专有云版本需要的额外 RPC 参数。 */
         public Map<String, String> parameters = new LinkedHashMap<>();
+        /** 原始记录转标准事件时使用的字段准入和身份字段。 */
+        public NormalizationConfig normalization = new NormalizationConfig();
     }
 
     /** 一条 ARMS 指标查询任务。 */
@@ -125,6 +314,8 @@ public class CollectorConfig {
         public int interval = 60;
         /** 单次指标查询的返回上限。 */
         public int limit = 10000;
+        /** 原始记录转标准事件时使用的字段准入和身份字段。 */
+        public NormalizationConfig normalization = new NormalizationConfig();
     }
 
     /** ARMS Dataset 接口连接参数。 */
@@ -153,6 +344,8 @@ public class CollectorConfig {
         public List<String> measures = new ArrayList<>();
         /** 额外表单参数。 */
         public Map<String, String> parameters = new LinkedHashMap<>();
+        /** 原始记录转标准事件时使用的字段准入和身份字段。 */
+        public NormalizationConfig normalization = new NormalizationConfig();
     }
 
     /** SLS 连接和项目配置。 */
@@ -193,5 +386,18 @@ public class CollectorConfig {
         public int pageSize = 100;
         /** 是否按时间倒序返回日志。 */
         public boolean reverse;
+        /** 原始记录转标准事件时使用的字段准入和身份字段。 */
+        public NormalizationConfig normalization = new NormalizationConfig();
+    }
+
+    /**
+     * 单个采集任务的标准化策略。
+     * 空列表表示使用对应转换器的保守内置规则；配置后只准入列出的 payload 字段。
+     */
+    public static class NormalizationConfig {
+        /** 允许进入标准事件 payload 的原始字段名；字段名匹配忽略大小写。 */
+        public List<String> payloadFields = new ArrayList<>();
+        /** 现场能够保证稳定的原始记录身份字段，按配置顺序参与 event_id。 */
+        public List<String> identityFields = new ArrayList<>();
     }
 }

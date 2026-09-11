@@ -1,0 +1,104 @@
+schemaVersion: "0.1.1"
+projectCode: "kjky20250400"
+envCode: "test"
+batchId: "batch001"
+caseId: "case01"
+timezone: "Asia/Shanghai"
+
+collector:
+  collectorId: "aliyun-collector-test01"
+  siteId: "site01"
+  collectorType: "ALIYUN"
+
+runtime:
+  deploymentMode: "DEVELOPMENT"
+  windowSeconds: 600
+  requestTimeoutSeconds: 30
+  maxRetries: 3
+  retryBaseMillis: 500
+  maxPollAttempts: 10
+  pollIntervalMillis: 1000
+
+scheduler:
+  jitterSeconds: 3
+  shutdownGraceSeconds: 60
+  compensationIntervalSeconds: 600
+  compensationLookbackSeconds: 1800
+  arms:
+    pollIntervalSeconds: 30
+    visibilityDelaySeconds: 90
+    initialLookbackSeconds: 300
+  sls:
+    pollIntervalSeconds: 20
+    visibilityDelaySeconds: 30
+    initialLookbackSeconds: 120
+
+upload:
+  enabled: true
+  ingestUrl: "https://cc-ingest.cc-system.svc.cluster.local/collector/v1/events:batch"
+  maxRecords: 1000
+  maxCompressedBytes: 2097152
+  maxRequestBytes: 10485760
+  maxWaitMillis: 5000
+  maxInFlightBatches: 2
+  connectTimeoutSeconds: 10
+  requestTimeoutSeconds: 30
+  retryInitialDelayMillis: 1000
+  retryMaxDelayMillis: 60000
+  retryJitterRatio: 0.2
+  retryWarningAttempts: 10
+
+security:
+  mtlsEnabled: true
+  clientAuthMode: "KEYSTORE"
+  clientCertificatePath: null
+  privateKeyPath: null
+  keyStorePath: "./secrets/client.p12"
+  keyStoreType: "PKCS12"
+  keyStorePasswordEnv: "COLLECTOR_KEYSTORE_PASSWORD"
+  trustStorePath: "./secrets/trust.p12"
+  trustStoreType: "PKCS12"
+  trustStorePasswordEnv: "COLLECTOR_TRUSTSTORE_PASSWORD"
+  certificateExpiryWarningDays: 30
+  certificateReloadIntervalSeconds: 30
+
+storage:
+  dataRoot: "./target/config-test-data"
+  outboxDir: "outbox"
+  stateDir: "state"
+  rawPersistence:
+    enabled: true
+    directory: "raw"
+  diskWarningWatermarkPercent: 80
+  diskCriticalWatermarkPercent: 90
+  diskResumeWatermarkPercent: 75
+  diskCheckIntervalSeconds: 10
+
+control:
+  enabled: true
+  taskClaimUrl: "https://cc-control-service.cc-system.svc.cluster.local/collector/v1/jobs:claim"
+  heartbeatIntervalSeconds: 30
+  taskPollIntervalSeconds: 10
+  requestTimeoutSeconds: 30
+
+arms:
+  enabled: false
+
+sls:
+  enabled: true
+  endpoint: "sls.internal.example"
+  accessKeyIdEnv: "SLS_ACCESS_KEY_ID"
+  accessKeySecretEnv: "SLS_ACCESS_KEY_SECRET"
+  stsTokenEnv: "SLS_STS_TOKEN"
+  projects:
+    - project: "project01"
+      logstores:
+        - logstore: "logstore01"
+          recordType: "flow_record"
+          topic: ""
+          query: ""
+          pageSize: 100
+          reverse: false
+          normalization:
+            payloadFields: ["message", "trace_id", "service_id"]
+            identityFields: ["request_id"]

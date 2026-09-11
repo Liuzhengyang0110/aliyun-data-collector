@@ -39,6 +39,32 @@ class CoreTest {
         assertThat(new ConfigValidator().validate(c, false)).isEmpty();
     }
 
+    @Test
+    void validatesDaemonSchedulerBoundaries() {
+        CollectorConfig c = base();
+        c.sls.enabled = true;
+        var project = new CollectorConfig.SlsProject();
+        project.project = "p1";
+        var logstore = new CollectorConfig.SlsLogstore();
+        logstore.logstore = "l1";
+        logstore.recordType = "flow_record";
+        project.logstores.add(logstore);
+        c.sls.projects.add(project);
+
+        c.scheduler.sls.pollIntervalSeconds = 0;
+        c.scheduler.sls.visibilityDelaySeconds = -1;
+        c.scheduler.sls.initialLookbackSeconds = 0;
+        c.scheduler.jitterSeconds = -1;
+        c.scheduler.shutdownGraceSeconds = 0;
+
+        assertThat(new ConfigValidator().validate(c, false))
+                .contains("scheduler.sls.pollIntervalSeconds 必须在 1..86400")
+                .contains("scheduler.sls.visibilityDelaySeconds 必须在 0..604800")
+                .contains("scheduler.sls.initialLookbackSeconds 必须在 1..2592000")
+                .contains("scheduler.jitterSeconds 必须在 0..3600")
+                .contains("scheduler.shutdownGraceSeconds 必须在 1..3600");
+    }
+
     static CollectorConfig base() {
         CollectorConfig c = new CollectorConfig();
         c.projectCode = "kjky20250400";
@@ -46,6 +72,8 @@ class CoreTest {
         c.batchId = "b001";
         c.caseId = "case01";
         c.outputRoot = "./target/test-output";
+        c.collector.collectorId = "aliyun-collector-test";
+        c.collector.siteId = "test-site";
         return c;
     }
 }

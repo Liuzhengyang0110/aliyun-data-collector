@@ -4,14 +4,86 @@ envCode: "__REQUIRED_ON_SITE__"
 batchId: "__REQUIRED_ON_SITE__"
 caseId: "__REQUIRED_ON_SITE__"
 timezone: "Asia/Shanghai"
-outputRoot: "./data-package"
+
+collector:
+  collectorId: "__REQUIRED_ON_SITE__"
+  siteId: "__REQUIRED_ON_SITE__"
+  collectorType: "ALIYUN"
+
 runtime:
+  # 开发阶段使用 DEVELOPMENT；生产配置改为 PRODUCTION 并关闭 rawPersistence。
+  deploymentMode: "DEVELOPMENT"
   windowSeconds: 600
   requestTimeoutSeconds: 30
   maxRetries: 3
   retryBaseMillis: 500
   maxPollAttempts: 10
   pollIntervalMillis: 1000
+
+scheduler:
+  jitterSeconds: 3
+  shutdownGraceSeconds: 60
+  compensationIntervalSeconds: 600
+  compensationLookbackSeconds: 1800
+  arms:
+    pollIntervalSeconds: 30
+    visibilityDelaySeconds: 90
+    initialLookbackSeconds: 300
+  sls:
+    pollIntervalSeconds: 20
+    visibilityDelaySeconds: 30
+    initialLookbackSeconds: 120
+
+# BatchUploader 已接入 daemon 独立上传循环；启用上传后 ingestUrl 必填。
+upload:
+  enabled: false
+  ingestUrl: null
+  maxRecords: 1000
+  maxCompressedBytes: 2097152
+  maxRequestBytes: 10485760
+  maxWaitMillis: 5000
+  maxInFlightBatches: 2
+  connectTimeoutSeconds: 10
+  requestTimeoutSeconds: 30
+  retryInitialDelayMillis: 1000
+  retryMaxDelayMillis: 60000
+  retryJitterRatio: 0.2
+  retryWarningAttempts: 10
+
+security:
+  mtlsEnabled: false
+  clientAuthMode: "KEYSTORE"
+  clientCertificatePath: null
+  privateKeyPath: null
+  keyStorePath: null
+  keyStoreType: "PKCS12"
+  keyStorePasswordEnv: null
+  trustStorePath: null
+  trustStoreType: "PKCS12"
+  trustStorePasswordEnv: null
+  certificateExpiryWarningDays: 30
+  certificateReloadIntervalSeconds: 30
+
+storage:
+  dataRoot: "./data-package"
+  outboxDir: "outbox"
+  stateDir: "state"
+  rawPersistence:
+    # 生产模式必须为 false；当前 Outbox 未完成前，关闭后会安全拒绝采集。
+    enabled: true
+    directory: "raw"
+  diskWarningWatermarkPercent: 80
+  diskCriticalWatermarkPercent: 90
+  diskResumeWatermarkPercent: 75
+  diskCheckIntervalSeconds: 10
+
+control:
+  enabled: false
+  taskClaimUrl: null
+  heartbeatIntervalSeconds: 30
+  taskPollIntervalSeconds: 10
+  requestTimeoutSeconds: 30
+
 arms:
   enabled: true
   mode: "DATASET"
@@ -26,5 +98,8 @@ arms:
         intervalInSec: 60
         measures: ["__REQUIRED_ON_SITE__"]
         parameters: {}
+        normalization:
+          payloadFields: ["timestamp", "value", "values", "dimensions"]
+          identityFields: []
 sls:
   enabled: false

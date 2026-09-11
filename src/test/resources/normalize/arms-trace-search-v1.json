@@ -1,0 +1,15 @@
+{
+  "PageBean": {
+    "TraceInfos": [
+      {
+        "TraceID": "trace-001",
+        "StartTime": 1785722400123,
+        "ServiceName": "order-service",
+        "OperationName": "POST /orders",
+        "Duration": 18,
+        "StatusCode": 200,
+        "unapproved_secret": "synthetic-secret-must-not-leak"
+      }
+    ]
+  }
+}

@@ -21,6 +21,7 @@
         <java.version>17</java.version>
         <aliyun.log.version>0.6.120</aliyun.log.version>
         <aliyun.sdk.core.version>4.7.3</aliyun.sdk.core.version>
+        <bouncycastle.version>1.77</bouncycastle.version>
     </properties>
 
     <dependencies>
@@ -50,6 +51,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>${bouncycastle.version}</version>
         </dependency>
     </dependencies>
 

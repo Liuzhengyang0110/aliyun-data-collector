@@ -5,3 +5,5 @@
 /config/site.yaml
 *.partial
 *.log
+# docs/ 是 project-wiki(Gitee) 的独立工作区，不纳入本仓库
+/docs/
