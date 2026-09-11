@@ -1,0 +1,1 @@
+{"Data":[{"timestamp":1785722400,"metric":"service_qps","serviceName":"order-service","value":12.5,"dimensions":{"zone":"zone-a"}}]}

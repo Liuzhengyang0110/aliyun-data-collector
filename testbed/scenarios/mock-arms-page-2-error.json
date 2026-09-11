@@ -1,0 +1,6 @@
+{
+  "scenario": "SERVER_ERROR",
+  "times": 1,
+  "target_action": "SearchTracesByPage",
+  "page_number": 2
+}

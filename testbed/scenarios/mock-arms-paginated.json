@@ -1,0 +1,5 @@
+{
+  "scenario": "PAGINATED",
+  "times": 4,
+  "target_action": "SearchTracesByPage"
+}

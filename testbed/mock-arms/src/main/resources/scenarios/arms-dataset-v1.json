@@ -1,0 +1,1 @@
+{"rows":[{"timestamp":1785722400000,"service_id":"inventory-service","instance_id":"inventory-pod-1","values":[3,5,8],"dimensions":{"cluster":"cluster-a"}}]}

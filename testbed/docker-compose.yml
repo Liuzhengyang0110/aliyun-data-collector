@@ -1,0 +1,65 @@
+name: aliyun-collector-testbed
+
+services:
+  mock-cc-ingest:
+    build:
+      context: ./mock-cc-ingest
+    environment:
+      MOCK_CC_BIND_ADDRESS: "0.0.0.0"
+      MOCK_CC_PORT: "9443"
+      MOCK_CC_STATE_DIR: "/var/lib/mock-cc-ingest"
+      MOCK_CC_KEYSTORE_PATH: "/run/testbed-pki/server.p12"
+      MOCK_CC_TRUSTSTORE_PATH: "/run/testbed-pki/server-trust.p12"
+      MOCK_CC_COLLECTOR_CERT_MAP: "/run/testbed-pki/collector-cert-map.json"
+      MOCK_CC_KEYSTORE_PASSWORD: "${TESTBED_KEYSTORE_PASSWORD:?Set TESTBED_KEYSTORE_PASSWORD to the test-only PKI password}"
+      MOCK_CC_TRUSTSTORE_PASSWORD: "${TESTBED_KEYSTORE_PASSWORD:?Set TESTBED_KEYSTORE_PASSWORD to the test-only PKI password}"
+      MOCK_CC_HEALTH_KEYSTORE_PATH: "/run/testbed-pki/client-1.p12"
+      MOCK_CC_HEALTH_TRUSTSTORE_PATH: "/run/testbed-pki/collector-trust.p12"
+      MOCK_CC_HEALTH_URL: "https://localhost:9443/__admin/health"
+    ports:
+      - "127.0.0.1:9443:9443"
+    volumes:
+      - mock-cc-state:/var/lib/mock-cc-ingest
+      - ./.generated/pki:/run/testbed-pki:ro
+    networks:
+      - collector-testbed
+    healthcheck:
+      test: ["CMD", "java", "-cp", "/app/mock-cc-ingest.jar", "cn.kjky.collector.testbed.cc.MockCcHealthCheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    mem_limit: 256m
+    cpus: 1.0
+    restart: "no"
+
+  mock-arms:
+    build:
+      context: ./mock-arms
+    environment:
+      MOCK_ARMS_BIND_ADDRESS: "0.0.0.0"
+      MOCK_ARMS_PORT: "9410"
+      MOCK_ARMS_EXPECTED_ACCESS_KEY_ID: "${TESTBED_ARMS_ACCESS_KEY_ID:-testbed-access-key-id}"
+      MOCK_ARMS_DATASET_USERNAME: "${TESTBED_ARMS_DATASET_USERNAME:-testbed-user}"
+      MOCK_ARMS_DATASET_PASSWORD: "${TESTBED_ARMS_DATASET_PASSWORD:-testbed-password}"
+      MOCK_ARMS_HEALTH_URL: "http://127.0.0.1:9410/__admin/health"
+    ports:
+      - "127.0.0.1:9410:9410"
+    networks:
+      - collector-testbed
+    healthcheck:
+      test: ["CMD", "java", "-cp", "/opt/testbed/mock-arms.jar", "cn.kjky.collector.testbed.arms.MockArmsHealthCheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 3s
+    mem_limit: 256m
+    cpus: 1.0
+    restart: "no"
+
+networks:
+  collector-testbed:
+    driver: bridge
+
+volumes:
+  mock-cc-state:
