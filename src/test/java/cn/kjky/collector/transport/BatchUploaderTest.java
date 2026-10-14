@@ -210,6 +210,8 @@ class BatchUploaderTest {
             assertThat(uploader.status().state()).isEqualTo(BatchUploader.UploaderState.PAUSED_AUTHENTICATION);
             assertThat(uploader.status().priority()).isEqualTo(BatchUploader.ErrorPriority.HIGH);
             assertThat(uploader.uploadAvailable().claimed()).isZero();
+            uploader.resumeAfterAuthenticationRepair();
+            assertThat(uploader.status().state()).isEqualTo(BatchUploader.UploaderState.ACTIVE);
         }
 
         assertThat(received).hasSize(1);

@@ -46,6 +46,14 @@ class MockArmsServerTest {
         assertThat(json.readTree(apps.body()).path("TraceApps")).hasSize(1);
         assertThat(json.readTree(search.body()).at("/PageBean/TraceInfos")).hasSize(3);
         assertThat(json.readTree(detail.body()).at("/Data/Spans")).hasSize(2);
+        assertThat(json.readTree(detail.body()).at("/Data/Spans/0/SpanType").asText())
+                .isEqualTo("SIMULATED_CLIENT");
+        assertThat(json.readTree(detail.body()).at("/Data/Spans/0/peer_service").asText())
+                .isEqualTo("payment-service");
+        assertThat(json.readTree(detail.body()).at("/Data/Spans/0/OperationName").asText())
+                .isEqualTo("POST /orders");
+        assertThat(json.readTree(detail.body()).at("/Data/Spans/1/SpanType").asText())
+                .isEqualTo("SIMULATED_SERVER");
         assertThat(json.readTree(metric.body()).path("Data").size()).isGreaterThan(1);
         assertThat(json.readTree(metricPage.body()).at("/PageBean/Records")).hasSize(2);
     }

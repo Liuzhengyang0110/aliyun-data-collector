@@ -223,13 +223,21 @@ public final class MockArmsServer implements AutoCloseable {
         int count = scenario == ArmsScenarioController.Name.DUPLICATE_RECORDS ? 3 : 2;
         for (int i = 0; i < count; i++) {
             int stableIndex = i == 2 ? 0 : i;
-            spans.addObject().put("TraceID", traceId).put("SpanId", "span-" + shortHash(traceId + ":" + stableIndex))
+            boolean clientSpan = stableIndex == 0;
+            String localService = clientSpan ? "order-service" : "payment-service";
+            String peerService = clientSpan ? "payment-service" : "order-service";
+            String spanId = "span-" + shortHash(traceId + ":" + stableIndex);
+            spans.addObject().put("TraceID", traceId).put("SpanId", spanId)
                     .put("timestamp", 1_700_000_000_000L + Math.floorMod(traceId.hashCode(), 1_000_000) + stableIndex)
-                    .put("serviceName", stableIndex == 0 ? "order-service" : "payment-service")
-                    .put("service_id", stableIndex == 0 ? "order-service" : "payment-service")
+                    .put("serviceName", localService)
+                    .put("service_id", localService)
                     .put("instanceId", "testbed-instance-" + (stableIndex + 1))
                     .put("instance_id", "testbed-instance-" + (stableIndex + 1))
-                    .put("operationName", stableIndex == 0 ? "POST /orders" : "POST /pay")
+                    .put("SpanType", clientSpan ? "SIMULATED_CLIENT" : "SIMULATED_SERVER")
+                    .put("peer_service", peerService)
+                    .put("ParentSpanId", stableIndex == 0 ? "parent-" + shortHash(traceId) : "span-"
+                            + shortHash(traceId + ":0"))
+                    .put("OperationName", "POST /orders")
                     .put("duration", 5 + stableIndex).put("status_code", 200);
         }
         return root;

@@ -13,8 +13,10 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 
 /**
  * 生产模式常驻调度器。
@@ -34,8 +36,10 @@ public final class ProductionPollScheduler implements DaemonLoop {
     private final Random random;
     private final Consumer<String> info;
     private final Consumer<String> error;
-    private final BooleanSupplier collectionAllowed;
+    private final Predicate<CollectionSource> collectionAllowed;
     private final Map<CollectionSource, AtomicBoolean> running = new EnumMap<>(CollectionSource.class);
+    private final Map<CollectionSource, AtomicReference<SourceRuntimeStatus>> runtime =
+            new EnumMap<>(CollectionSource.class);
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean accepting = new AtomicBoolean(true);
 
@@ -46,6 +50,12 @@ public final class ProductionPollScheduler implements DaemonLoop {
     /** 创建带 Outbox/PVC 容量门控的生产调度器。 */
     public ProductionPollScheduler(CollectorConfig config, SourceCollector collector,
                                    BooleanSupplier collectionAllowed) {
+        this(config, collector, ignored -> collectionAllowed.getAsBoolean());
+    }
+
+    /** 创建带按数据源组合门控的生产调度器。 */
+    public ProductionPollScheduler(CollectorConfig config, SourceCollector collector,
+                                   Predicate<CollectionSource> collectionAllowed) {
         this(config, collector, Clock.systemUTC(), Executors.newScheduledThreadPool(2, runnable -> {
             Thread thread = new Thread(runnable, "collector-production-poll-scheduler");
             thread.setDaemon(false);
@@ -63,6 +73,14 @@ public final class ProductionPollScheduler implements DaemonLoop {
                             ScheduledExecutorService executor, Random random,
                             Consumer<String> info, Consumer<String> error,
                             BooleanSupplier collectionAllowed) {
+        this(config, collector, clock, executor, random, info, error,
+                ignored -> collectionAllowed.getAsBoolean());
+    }
+
+    ProductionPollScheduler(CollectorConfig config, SourceCollector collector, Clock clock,
+                            ScheduledExecutorService executor, Random random,
+                            Consumer<String> info, Consumer<String> error,
+                            Predicate<CollectionSource> collectionAllowed) {
         this.config = config;
         this.collector = collector;
         this.clock = clock;
@@ -72,7 +90,10 @@ public final class ProductionPollScheduler implements DaemonLoop {
         this.error = error;
         this.collectionAllowed = java.util.Objects.requireNonNull(collectionAllowed,
                 "collectionAllowed 不能为空");
-        for (CollectionSource source : CollectionSource.values()) running.put(source, new AtomicBoolean());
+        for (CollectionSource source : CollectionSource.values()) {
+            running.put(source, new AtomicBoolean());
+            runtime.put(source, new AtomicReference<>(SourceRuntimeStatus.initial()));
+        }
     }
 
     public void start() {
@@ -90,20 +111,39 @@ public final class ProductionPollScheduler implements DaemonLoop {
             return;
         }
         try {
-            if (!collectionAllowed.getAsBoolean()) {
-                info.accept(source + " 因 Outbox/PVC 容量为 CRITICAL 暂停新查询窗口；上传继续运行");
+            updateRunning(source, true);
+            if (!collectionAllowed.test(source)) {
+                info.accept(source + " 因人工暂停、容量 CRITICAL 或本地配置无效，未开始新查询窗口；上传继续运行");
                 return;
             }
             CollectorConfig.SourceScheduleConfig schedule = schedule(source);
             Instant queryEnd = clock.instant().truncatedTo(ChronoUnit.SECONDS)
                     .minusSeconds(schedule.visibilityDelaySeconds);
             collector.collect(source, queryEnd, schedule.initialLookbackSeconds);
+            runtime.get(source).set(new SourceRuntimeStatus(false, clock.instant(), null, 0));
             info.accept(source + " 生产轮询完成，任务水位已按 pending 批次分别推进至 " + queryEnd);
         } catch (Exception e) {
+            SourceRuntimeStatus before = runtime.get(source).get();
+            runtime.get(source).set(new SourceRuntimeStatus(false, before.lastSuccessAt(), clock.instant(),
+                    Math.min(Integer.MAX_VALUE, before.consecutiveFailures() + 1)));
             error.accept(source + " 生产轮询失败，受影响任务水位未推进，后续轮次将重试: " + safe(e));
         } finally {
             sourceRunning.set(false);
+            SourceRuntimeStatus before = runtime.get(source).get();
+            if (before.running()) updateRunning(source, false);
         }
+    }
+
+    private void updateRunning(CollectionSource source, boolean value) {
+        runtime.get(source).updateAndGet(before -> new SourceRuntimeStatus(value,
+                before.lastSuccessAt(), before.lastFailureAt(), before.consecutiveFailures()));
+    }
+
+    /** 供状态上报线程读取的不可变、线程安全数据源运行摘要。 */
+    public Map<CollectionSource, SourceRuntimeStatus> runtimeStatusSnapshot() {
+        Map<CollectionSource, SourceRuntimeStatus> result = new EnumMap<>(CollectionSource.class);
+        runtime.forEach((source, value) -> result.put(source, value.get()));
+        return Map.copyOf(result);
     }
 
     private void scheduleNext(CollectionSource source, boolean initial) {
@@ -160,5 +200,10 @@ public final class ProductionPollScheduler implements DaemonLoop {
             executor.shutdownNow();
             Thread.currentThread().interrupt();
         }
+    }
+
+    public record SourceRuntimeStatus(boolean running, Instant lastSuccessAt,
+                                      Instant lastFailureAt, int consecutiveFailures) {
+        static SourceRuntimeStatus initial() { return new SourceRuntimeStatus(false, null, null, 0); }
     }
 }

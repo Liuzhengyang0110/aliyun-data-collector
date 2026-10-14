@@ -16,6 +16,8 @@ runtime:
   requestTimeoutSeconds: 30
   maxRetries: 3
   retryBaseMillis: 500
+  retryMaxDelayMillis: 30000
+  retryJitterRatio: 0.2
   maxPollAttempts: 10
   pollIntervalMillis: 1000
 
@@ -73,13 +75,30 @@ storage:
   diskCriticalWatermarkPercent: 90
   diskResumeWatermarkPercent: 75
   diskCheckIntervalSeconds: 10
+  outboxQuota:
+    defaultBytes: 10737418240
+    minBytes: 1073741824
+    maxBytes: 21474836480
+    reservedFreeBytes: 1073741824
+    warningPercent: 80
+    criticalPercent: 90
+    resumePercent: 75
+    checkIntervalSeconds: 10
 
 control:
-  enabled: true
+  enabled: false
   taskClaimUrl: "https://cc-control-service.cc-system.svc.cluster.local/collector/v1/jobs:claim"
+  jobStatusUrl: "https://cc-control-service.cc-system.svc.cluster.local/collector/v1/jobs/{job_id}/status"
+  statusReportUrl: "https://cc-control-service.cc-system.svc.cluster.local/collector/v1/status"
   heartbeatIntervalSeconds: 30
+  statusChangeMinIntervalMillis: 1000
   taskPollIntervalSeconds: 10
+  taskPollJitterSeconds: 2
+  connectTimeoutSeconds: 10
   requestTimeoutSeconds: 30
+  retryInitialDelayMillis: 1000
+  retryMaxDelayMillis: 30000
+  retryJitterRatio: 0.2
 
 arms:
   enabled: false

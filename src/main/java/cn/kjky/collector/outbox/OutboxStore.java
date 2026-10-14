@@ -41,6 +41,7 @@ public final class OutboxStore {
     private final AtomicLong changeVersion = new AtomicLong();
     private final ReentrantLock changeLock = new ReentrantLock();
     private final Condition changed = changeLock.newCondition();
+    private OutboxSpaceGuard spaceGuard;
     private boolean preferRetry;
 
     /** 按采集配置初始化目录并执行启动恢复。不会创建 raw、manifest 或 committed。 */
@@ -91,20 +92,31 @@ public final class OutboxStore {
         if (Files.exists(writing)) {
             throw new IOException("存在同批次 writing 残留，请重新初始化 Outbox 执行恢复: " + batch.batchId());
         }
-        Files.createDirectory(writing);
 
         Instant now = clock.instant();
         OutboxBatch descriptor = OutboxBatch.from(batch, serialized, now, normalizeParent(parentBatchId));
         OutboxDelivery delivery = OutboxDelivery.pending(batch.batchId(), now);
-        OutboxFiles.writeAtomic(writing.resolve(OutboxFiles.BATCH_FILE), serialized);
-        OutboxFiles.writeAtomic(writing.resolve(OutboxFiles.DESCRIPTOR_FILE), OutboxFiles.writeDescriptor(descriptor));
-        OutboxFiles.writeAtomic(writing.resolve(OutboxFiles.DELIVERY_FILE), OutboxFiles.writeDelivery(delivery));
+        byte[] descriptorBytes = OutboxFiles.writeDescriptor(descriptor);
+        byte[] deliveryBytes = OutboxFiles.writeDelivery(delivery);
+        long requiredBytes = sumLengths(serialized, descriptorBytes, deliveryBytes);
+        OutboxSpaceGuard.Reservation reservation = reserve(requiredBytes, parentBatchId != null);
+        try {
+            Files.createDirectory(writing);
+            OutboxFiles.writeAtomic(writing.resolve(OutboxFiles.BATCH_FILE), serialized);
+            OutboxFiles.writeAtomic(writing.resolve(OutboxFiles.DESCRIPTOR_FILE), descriptorBytes);
+            OutboxFiles.writeAtomic(writing.resolve(OutboxFiles.DELIVERY_FILE), deliveryBytes);
 
-        Path pending = pendingRoot.resolve(directoryName);
-        if (Files.exists(pending)) throw new IOException("pending 中已存在同名批次，拒绝覆盖: " + batch.batchId());
-        OutboxFiles.moveAtomic(writing, pending, false);
-        signalAvailabilityChange();
-        return OutboxFiles.load(pending);
+            Path pending = pendingRoot.resolve(directoryName);
+            if (Files.exists(pending)) throw new IOException("pending 中已存在同名批次，拒绝覆盖: " + batch.batchId());
+            OutboxFiles.moveAtomic(writing, pending, false);
+            reservation.commit(requiredBytes);
+            signalAvailabilityChange();
+            return OutboxFiles.load(pending);
+        } catch (IOException | RuntimeException e) {
+            reservation.close();
+            reconcileAfterFailedMutation(e);
+            throw e;
+        }
     }
 
     public OutboxStoredBatch enqueue(BatchEnvelope batch) throws IOException {
@@ -148,7 +160,7 @@ public final class OutboxStore {
         claim.requireOwner(this);
         OutboxStoredBatch current = reloadClaim(claim);
         OutboxDelivery updated = current.delivery().retry(category, nextRetryAt, clock.instant());
-        OutboxFiles.writeAtomic(current.directory().resolve(OutboxFiles.DELIVERY_FILE), OutboxFiles.writeDelivery(updated));
+        writeDelivery(current.directory(), updated);
         Path target = retryRoot.resolve(current.directory().getFileName());
         if (!current.directory().getParent().equals(retryRoot)) {
             if (Files.exists(target)) throw new IOException("retry 中已存在同名批次，拒绝覆盖: " + target);
@@ -163,7 +175,7 @@ public final class OutboxStore {
         claim.requireOwner(this);
         OutboxStoredBatch current = reloadClaim(claim);
         OutboxDelivery updated = current.delivery().blocked(category, clock.instant());
-        OutboxFiles.writeAtomic(current.directory().resolve(OutboxFiles.DELIVERY_FILE), OutboxFiles.writeDelivery(updated));
+        writeDelivery(current.directory(), updated);
         Path target = pendingRoot.resolve(current.directory().getFileName());
         if (!current.directory().getParent().equals(pendingRoot)) {
             if (Files.exists(target)) throw new IOException("pending 中已存在同名批次，拒绝覆盖: " + target);
@@ -191,8 +203,7 @@ public final class OutboxStore {
         if (!updated.childBatchIds().equals(childIds)) {
             throw new IOException("父批已经保存了不同的 413 子批关系: " + parent.batch().batchId());
         }
-        OutboxFiles.writeAtomic(parent.directory().resolve(OutboxFiles.DELIVERY_FILE),
-                OutboxFiles.writeDelivery(updated));
+        writeDelivery(parent.directory(), updated);
         Path target = pendingRoot.resolve(parent.directory().getFileName());
         if (!parent.directory().getParent().equals(pendingRoot)) {
             if (Files.exists(target)) throw new IOException("pending 中已存在同名父批，拒绝覆盖: " + target);
@@ -209,8 +220,7 @@ public final class OutboxStore {
                 .orElseThrow(() -> new IOException("找不到 413 父批: " + parentBatchId));
         OutboxDelivery updated = parent.delivery().childCommitted(childBatchId, clock.instant());
         if (updated != parent.delivery()) {
-            OutboxFiles.writeAtomic(parent.directory().resolve(OutboxFiles.DELIVERY_FILE),
-                    OutboxFiles.writeDelivery(updated));
+            writeDelivery(parent.directory(), updated);
         }
         signalAvailabilityChange();
         return OutboxFiles.load(parent.directory());
@@ -319,6 +329,21 @@ public final class OutboxStore {
         return stateRoot;
     }
 
+    /** 启动恢复完成后接入逻辑配额；一个 Store 生命周期中只允许绑定一次。 */
+    public synchronized void attachSpaceGuard(OutboxSpaceGuard guard) throws IOException {
+        Objects.requireNonNull(guard, "guard 不能为空");
+        if (spaceGuard != null && spaceGuard != guard) {
+            throw new IllegalStateException("OutboxStore 已经绑定逻辑配额管理器");
+        }
+        spaceGuard = guard;
+        guard.reconcileNow();
+    }
+
+    /** 未绑定逻辑配额的兼容调用返回 true；生产 daemon 会在启动前完成绑定。 */
+    public synchronized boolean collectionAllowed() {
+        return spaceGuard == null || spaceGuard.collectionAllowed();
+    }
+
     private OutboxStoredBatch reloadClaim(OutboxClaim claim) throws IOException {
         Path path = claim.stored().directory();
         if (!Files.isDirectory(path)) throw new IOException("已认领的 Outbox 批次不存在: " + path);
@@ -386,10 +411,80 @@ public final class OutboxStore {
     }
 
     private void moveToDeletingAndDelete(Path source) throws IOException {
+        long bytes = directoryBytes(source);
         Path deleting = writingRoot.resolve(source.getFileName() + ".deleting");
         if (Files.exists(deleting)) throw new IOException("存在同名待删除批次，拒绝覆盖: " + deleting);
-        OutboxFiles.moveAtomic(source, deleting, false);
-        OutboxFiles.deleteTransientDirectory(writingRoot, deleting, ".deleting");
+        try {
+            OutboxFiles.moveAtomic(source, deleting, false);
+            OutboxFiles.deleteTransientDirectory(writingRoot, deleting, ".deleting");
+            if (spaceGuard != null) spaceGuard.adjustUsage(-bytes);
+        } catch (IOException | RuntimeException e) {
+            reconcileAfterFailedMutation(e);
+            throw e;
+        }
+    }
+
+    /** delivery.json 原子替换期间会同时存在旧文件和 partial，因此预留完整新文件大小。 */
+    private void writeDelivery(Path directory, OutboxDelivery delivery) throws IOException {
+        byte[] bytes = OutboxFiles.writeDelivery(delivery);
+        Path target = directory.resolve(OutboxFiles.DELIVERY_FILE);
+        long previous = Files.size(target);
+        OutboxSpaceGuard.Reservation reservation = reserve(bytes.length, true);
+        try {
+            OutboxFiles.writeAtomic(target, bytes);
+            reservation.commit(bytes.length - previous);
+        } catch (IOException | RuntimeException e) {
+            reservation.close();
+            reconcileAfterFailedMutation(e);
+            throw e;
+        }
+    }
+
+    private OutboxSpaceGuard.Reservation reserve(long bytes, boolean maintenance) throws IOException {
+        if (spaceGuard == null) return NoopReservation.INSTANCE;
+        return maintenance ? spaceGuard.reserveMaintenance(bytes) : spaceGuard.reserveNewBatch(bytes);
+    }
+
+    private void reconcileAfterFailedMutation(Exception original) {
+        if (spaceGuard == null) return;
+        try {
+            spaceGuard.reconcileNow();
+        } catch (IOException reconciliationFailure) {
+            original.addSuppressed(reconciliationFailure);
+        }
+    }
+
+    private long directoryBytes(Path directory) throws IOException {
+        if (!Files.exists(directory)) return 0;
+        long total = 0;
+        try (var paths = Files.walk(directory)) {
+            for (Path path : paths.filter(Files::isRegularFile).toList()) {
+                total = Math.addExact(total, Files.size(path));
+            }
+        }
+        return total;
+    }
+
+    private long sumLengths(byte[]... values) throws IOException {
+        long total = 0;
+        try {
+            for (byte[] value : values) total = Math.addExact(total, value.length);
+            return total;
+        } catch (ArithmeticException e) {
+            throw new IOException("Outbox 批次字节数发生整数溢出", e);
+        }
+    }
+
+    private enum NoopReservation implements OutboxSpaceGuard.Reservation {
+        INSTANCE;
+
+        @Override
+        public void commit(long permanentDeltaBytes) {
+        }
+
+        @Override
+        public void close() {
+        }
     }
 
     private void validateChildren(BatchEnvelope parent, List<BatchEnvelope> children) {

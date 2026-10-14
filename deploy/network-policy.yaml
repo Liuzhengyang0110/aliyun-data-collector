@@ -1,0 +1,72 @@
+# 命名空间默认拒绝所有入站和出站。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: aliyun-collector-system
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress: []
+---
+# 采集端没有入站放行；中控控制、状态和数据上传均由采集端主动发起。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aliyun-data-collector-egress
+  namespace: aliyun-collector-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aliyun-data-collector
+  policyTypes:
+    - Egress
+  egress:
+    # 集群 DNS。现场若使用不同标签或端口，必须按实际 DNS 组件调整。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # cc-ingest，仅允许目标命名空间中的指定工作负载。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cc-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cc-ingest
+      ports:
+        - protocol: TCP
+          port: 8443
+    # cc-control-service：任务领取、结果和节点状态均复用此出站链路。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: cc-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cc-control-service
+      ports:
+        - protocol: TCP
+          port: 8443
+    # 原生 NetworkPolicy 不能按 FQDN 过滤。以下为 RFC 5737 不可路由测试网段，
+    # 部署前必须替换为现场 ARMS/SLS Endpoint 解析后的受控 CIDR。
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24
+        - ipBlock:
+            cidr: 198.51.100.0/24
+      ports:
+        - protocol: TCP
+          port: 443

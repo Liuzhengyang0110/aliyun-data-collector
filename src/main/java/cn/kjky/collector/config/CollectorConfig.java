@@ -28,6 +28,8 @@ public class CollectorConfig {
     public CollectorIdentityConfig collector = new CollectorIdentityConfig();
     /** 通用运行参数。 */
     public RuntimeConfig runtime = new RuntimeConfig();
+    /** 单个任务窗口的分页硬限制，达到限制但未证明完整时失败。 */
+    public PaginationLimits pagination = new PaginationLimits();
     /** 常驻模式下的数据源轮询调度参数。 */
     public SchedulerConfig scheduler = new SchedulerConfig();
     /** 向 cc-ingest 主动上传时使用的参数。 */
@@ -92,10 +94,32 @@ public class CollectorConfig {
         public int maxRetries = 3;
         /** 指数退避的基础毫秒数。 */
         public long retryBaseMillis = 500;
+        /** 云 API 查询退避的最大毫秒数，防止长时间故障时无上限增长。 */
+        public long retryMaxDelayMillis = 30000;
+        /** 云 API 查询退避的随机抖动比例，0.2 表示上下 20%。 */
+        public double retryJitterRatio = 0.2d;
         /** SLS 未完成查询的最大轮询次数。 */
         public int maxPollAttempts = 10;
         /** 两次 SLS 轮询之间的等待毫秒数。 */
         public long pollIntervalMillis = 1000;
+    }
+
+    public static class PaginationLimits {
+        public int maxPages = 1000;
+        public long maxRecords = 1000000;
+    }
+
+    /** 本地响应适配策略；JSON Pointer 必须按现场文档配置，不推测专有字段。 */
+    public static class PageMapping {
+        public String totalPointer;
+        public String positionPointer;
+        public String hasMorePointer;
+        public String truncatedPointer;
+        public String nextCursorPointer;
+        /** 仅 Dataset CURSOR 模式使用；不会自动选择请求参数名。 */
+        public String cursorParameter;
+        /** Dataset 默认要求响应提供结束证据；CURSOR 需要显式游标映射。 */
+        public String strategy = "SINGLE_RESPONSE";
     }
 
     /** 常驻模式的公共调度参数和各数据源调度参数。 */
@@ -172,7 +196,7 @@ public class CollectorConfig {
         public int certificateReloadIntervalSeconds = 30;
     }
 
-    /** 数据根目录、Outbox、状态目录和磁盘保护策略。 */
+    /** 数据根目录、Outbox、状态目录和容量保护策略。 */
     public static class StorageConfig {
         /** 开发输出或生产 Outbox/状态文件的数据根目录。 */
         public String dataRoot;
@@ -190,6 +214,28 @@ public class CollectorConfig {
         public int diskResumeWatermarkPercent = 75;
         /** Outbox/PVC 容量检查周期，单位为秒。 */
         public int diskCheckIntervalSeconds = 10;
+        /** 与 PVC 物理保护相互独立的 Outbox 逻辑配额。 */
+        public OutboxQuotaConfig outboxQuota = new OutboxQuotaConfig();
+    }
+
+    /** Outbox 逻辑配额的本地安全边界和滞回水位。 */
+    public static class OutboxQuotaConfig {
+        /** 尚未应用远程策略时的本地期望配额，默认 10 GiB。 */
+        public long defaultBytes = 10L * 1024 * 1024 * 1024;
+        /** 中控或本地策略允许设置的最小配额，默认 1 GiB。 */
+        public long minBytes = 1024L * 1024 * 1024;
+        /** 中控或本地策略允许设置的最大配额，默认 20 GiB。 */
+        public long maxBytes = 20L * 1024 * 1024 * 1024;
+        /** PVC 中始终留给文件系统、状态文件和上传过程的安全空间，默认 1 GiB。 */
+        public long reservedFreeBytes = 1024L * 1024 * 1024;
+        /** 逻辑配额告警水位。 */
+        public int warningPercent = 80;
+        /** 逻辑配额临界水位。 */
+        public int criticalPercent = 90;
+        /** 从逻辑临界状态恢复采集的水位。 */
+        public int resumePercent = 75;
+        /** Outbox 全量校正及物理安全上限复核周期，单位为秒。 */
+        public int checkIntervalSeconds = 10;
     }
 
     /** 开发阶段可选的原始响应落盘策略。 */
@@ -206,12 +252,28 @@ public class CollectorConfig {
         public boolean enabled;
         /** 领取任务的完整 URL。 */
         public String taskClaimUrl;
+        /** 回传任务状态的完整 URL 模板，必须包含 {job_id}。 */
+        public String jobStatusUrl;
+        /** P1-02 节点状态上报 URL。 */
+        public String statusReportUrl;
         /** 心跳间隔秒数。 */
         public int heartbeatIntervalSeconds = 30;
+        /** 状态快速变化合并后的最小上报间隔毫秒数。 */
+        public long statusChangeMinIntervalMillis = 1000;
         /** 任务轮询间隔秒数。 */
-        public int taskPollIntervalSeconds = 10;
+        public int taskPollIntervalSeconds = 7;
+        /** 任务轮询的正负随机抖动秒数。 */
+        public int taskPollJitterSeconds = 2;
+        /** 控制请求建连超时秒数。 */
+        public int connectTimeoutSeconds = 10;
         /** 控制请求超时秒数。 */
         public int requestTimeoutSeconds = 30;
+        /** 控制服务暂时不可用时的初始退避毫秒数。 */
+        public long retryInitialDelayMillis = 1000;
+        /** 控制服务暂时不可用时的最大退避毫秒数。 */
+        public long retryMaxDelayMillis = 30000;
+        /** 退避随机抖动比例，取值 0..1。 */
+        public double retryJitterRatio = 0.2d;
     }
 
     /** 单个数据源的轮询频率、数据可见性延迟和首次回看范围。 */
@@ -268,6 +330,7 @@ public class CollectorConfig {
 
     /** 一条 ARMS 链路搜索任务。空的筛选字段不会发送给 API。 */
     public static class TraceQuery {
+        public PageMapping pagination = new PageMapping();
         /** 任务唯一名称，用于 checkpoint。 */
         public String name;
         /** 现有命名规范中的记录类型。 */
@@ -292,11 +355,12 @@ public class CollectorConfig {
 
     /** 一条 ARMS 指标查询任务。 */
     public static class MetricQuery {
+        public PageMapping pagination = new PageMapping();
         /** 任务唯一名称，用于 checkpoint。 */
         public String name;
         /** 现有命名规范中的记录类型。 */
         public String recordType;
-        /** 指标 API 动作：QueryMetric 或 QueryMetricByPage。 */
+        /** 仅支持 QueryMetric；QueryMetricByPage 协议未确认，配置校验拒绝。 */
         public String action = "QueryMetric";
         /** ARMS 指标名称。 */
         public String metric;
@@ -308,7 +372,7 @@ public class CollectorConfig {
         public List<String> customFilters = new ArrayList<>();
         /** 结构化过滤条件，例如 pid 和 regionId。 */
         public Map<String, String> filters = new LinkedHashMap<>();
-        /** 现场版本的额外 RPC 参数；同名时覆盖程序生成值。 */
+        /** 现场版本的额外 RPC 参数；可覆盖非受保护字段，禁止覆盖时间窗和 Limit。 */
         public Map<String, String> parameters = new LinkedHashMap<>();
         /** 指标数据片间隔；实际单位以现场 API 文档为准。 */
         public int interval = 60;
@@ -332,6 +396,7 @@ public class CollectorConfig {
 
     /** 一条 ARMS Dataset 查询任务。 */
     public static class DatasetQuery {
+        public PageMapping pagination = new PageMapping();
         /** 任务唯一名称，用于 checkpoint。 */
         public String name;
         /** 现有命名规范中的记录类型。 */

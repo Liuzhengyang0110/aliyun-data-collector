@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aliyun-collector-system
+  labels:
+    kubernetes.io/metadata.name: aliyun-collector-system
+    app.kubernetes.io/part-of: microservice-security

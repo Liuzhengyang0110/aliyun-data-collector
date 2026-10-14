@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aliyun-data-collector-data
+  namespace: aliyun-collector-system
+  labels:
+    app.kubernetes.io/name: aliyun-data-collector
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # 部署前替换为现场提供的 StorageClass；逻辑 Outbox 上限不得随意等同于 PVC 容量。
+  storageClassName: replace-me-storage-class
+  resources:
+    requests:
+      storage: 30Gi

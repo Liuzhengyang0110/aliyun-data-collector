@@ -19,8 +19,16 @@ runtime:
   requestTimeoutSeconds: 30
   maxRetries: 3
   retryBaseMillis: 500
+  # 云 API 查询重试：有上限指数退避，并在上下 20% 范围内加入随机抖动。
+  retryMaxDelayMillis: 30000
+  retryJitterRatio: 0.2
   maxPollAttempts: 10
   pollIntervalMillis: 1000
+
+# 每个任务窗口的分页硬上限；达到上限但尚未完整结束时失败，不推进水位。
+pagination:
+  maxPages: 1000
+  maxRecords: 1000000
 
 # daemon 命令使用的数据源周期轮询配置。runtime.pollIntervalMillis 仅用于
 # 单次 SLS 查询尚未完成时的状态轮询，两者含义不同。
@@ -82,14 +90,32 @@ storage:
   diskCriticalWatermarkPercent: 90
   diskResumeWatermarkPercent: 75
   diskCheckIntervalSeconds: 10
+  outboxQuota:
+    # 远程策略首次成功生效前使用 defaultBytes；生产值按现场 PVC 容量评估。
+    defaultBytes: 10737418240
+    minBytes: 1073741824
+    maxBytes: 21474836480
+    reservedFreeBytes: 1073741824
+    warningPercent: 80
+    criticalPercent: 90
+    resumePercent: 75
+    checkIntervalSeconds: 10
 
 # 中控任务领取和心跳将在控制功能阶段启用。
 control:
   enabled: false
   taskClaimUrl: null
+  jobStatusUrl: null
+  statusReportUrl: null # 启用 control 时填写 /collector/v1/status 完整 URL
   heartbeatIntervalSeconds: 30
-  taskPollIntervalSeconds: 10
+  statusChangeMinIntervalMillis: 1000 # 连续变化合并限频，默认最多每秒补发一次
+  taskPollIntervalSeconds: 7
+  taskPollJitterSeconds: 2
+  connectTimeoutSeconds: 10
   requestTimeoutSeconds: 30
+  retryInitialDelayMillis: 1000
+  retryMaxDelayMillis: 30000
+  retryJitterRatio: 0.2
 
 arms:
   enabled: true
@@ -116,6 +142,13 @@ arms:
       maxDuration: null
       # 现场文档出现额外查询参数时在此透传。
       parameters: {}
+      # 自定义响应字段仅按现场文档配置 JSON Pointer；null 使用保守信封字段识别。
+      pagination:
+        totalPointer: null
+        positionPointer: null
+        hasMorePointer: null
+        truncatedPointer: null
+        nextCursorPointer: null
       normalization:
         # 留空时使用内置 ARMS Trace 安全字段；现场确认后可显式收紧。
         payloadFields: []
@@ -123,7 +156,7 @@ arms:
   metricQueries:
     - name: "service-metric"
       recordType: "flow_feature"
-      # 甲方文档为 QueryMetric；若现场版本为分页接口可改为 QueryMetricByPage。
+      # QueryMetricByPage 分页协议尚未确认，当前配置校验禁止启用。
       action: "QueryMetric"
       metric: "__REQUIRED_ON_SITE__"
       measures: ["__REQUIRED_ON_SITE__"]

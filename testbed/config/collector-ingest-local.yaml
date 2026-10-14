@@ -1,0 +1,112 @@
+schemaVersion: "0.1.1"
+projectCode: "TESTBED"
+envCode: "LOCAL"
+batchId: "TESTBED-ONLY"
+caseId: "MOCK-INTEGRATION"
+timezone: "Asia/Shanghai"
+
+collector:
+  collectorId: "testbed-collector-01"
+  siteId: "testbed-site"
+  collectorType: "ALIYUN"
+
+runtime:
+  deploymentMode: "PRODUCTION"
+  windowSeconds: 30
+  requestTimeoutSeconds: 3
+  maxRetries: 1
+  retryBaseMillis: 100
+  maxPollAttempts: 2
+  pollIntervalMillis: 100
+
+scheduler:
+  jitterSeconds: 0
+  shutdownGraceSeconds: 10
+  compensationIntervalSeconds: 600
+  compensationLookbackSeconds: 1800
+  arms:
+    pollIntervalSeconds: 2
+    visibilityDelaySeconds: 1
+    initialLookbackSeconds: 30
+  sls:
+    pollIntervalSeconds: 20
+    visibilityDelaySeconds: 30
+    initialLookbackSeconds: 120
+
+upload:
+  enabled: true
+  ingestUrl: "https://localhost:9001/collector/v1/events:batch"
+  maxRecords: 1000
+  maxCompressedBytes: 2097152
+  maxRequestBytes: 10485760
+  maxWaitMillis: 500
+  maxInFlightBatches: 2
+  connectTimeoutSeconds: 3
+  requestTimeoutSeconds: 3
+  retryInitialDelayMillis: 250
+  retryMaxDelayMillis: 2000
+  retryJitterRatio: 0.0
+  retryWarningAttempts: 5
+
+security:
+  mtlsEnabled: true
+  clientAuthMode: "KEYSTORE"
+  keyStorePath: "./testbed/.generated/pki/client-1.p12"
+  keyStoreType: "PKCS12"
+  keyStorePasswordEnv: "TESTBED_KEYSTORE_PASSWORD"
+  trustStorePath: "./testbed/.generated/pki/collector-trust.p12"
+  trustStoreType: "PKCS12"
+  trustStorePasswordEnv: "TESTBED_KEYSTORE_PASSWORD"
+  certificateExpiryWarningDays: 30
+  certificateReloadIntervalSeconds: 2
+
+storage:
+  dataRoot: "./testbed/.generated/arms-kafka-check-20261010/collector-data"
+  outboxDir: "outbox"
+  stateDir: "state"
+  rawPersistence:
+    enabled: false
+    directory: "raw"
+  diskWarningWatermarkPercent: 80
+  diskCriticalWatermarkPercent: 90
+  diskResumeWatermarkPercent: 75
+  diskCheckIntervalSeconds: 2
+
+control:
+  enabled: false
+  heartbeatIntervalSeconds: 30
+  taskPollIntervalSeconds: 10
+  requestTimeoutSeconds: 3
+
+arms:
+  enabled: true
+  mode: "RPC"
+  endpoint: "127.0.0.1:9410"
+  protocol: "HTTP"
+  regionId: "test-region"
+  product: "ARMS"
+  version: "2019-08-08"
+  accessKeyIdEnv: "TESTBED_ARMS_ACCESS_KEY_ID"
+  accessKeySecretEnv: "TESTBED_ARMS_ACCESS_KEY_SECRET"
+  pageSize: 2
+  collectTraceDetails: true
+  traceQueries:
+    - name: "testbed-traces"
+      recordType: "arms_trace"
+      pid: "testbed-pid"
+      normalization:
+        payloadFields: ["TraceID", "SpanID", "ServiceName", "Duration", "StartTime", "timestamp", "SpanType", "peer_service", "ParentSpanId", "OperationName"]
+        identityFields: ["TraceID"]
+  metricQueries: []
+  dataset:
+    url: "http://127.0.0.1:9410/QueryDataset"
+    usernameEnv: "TESTBED_ARMS_DATASET_USERNAME"
+    passwordEnv: "TESTBED_ARMS_DATASET_PASSWORD"
+    queries: []
+
+sls:
+  enabled: false
+  endpoint: "http://127.0.0.1:1"
+  accessKeyIdEnv: "TESTBED_SLS_ACCESS_KEY_ID"
+  accessKeySecretEnv: "TESTBED_SLS_ACCESS_KEY_SECRET"
+  projects: []

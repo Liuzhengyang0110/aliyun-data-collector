@@ -1,0 +1,885 @@
+openapi: 3.1.0
+info:
+  title: cc-control Collector Control and Status API
+  version: "1.0"
+  description: 采集端主动领取控制任务、回传任务状态并上报最新节点快照的 v1 契约。
+servers:
+  - url: https://cc-control.example.invalid
+paths:
+  "/collector/v1/jobs:claim":
+    post:
+      operationId: claimCollectorJob
+      summary: 采集端主动领取一个控制任务
+      description: 没有待领取任务时返回 204；网络重试可能返回相同 job_id，采集端必须幂等处理。
+      security:
+        - mutualTLS: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobClaimRequest"
+            examples:
+              claim:
+                value:
+                  schema_version: "1.0"
+                  collector_id: aliyun-collector-site01
+                  site_id: site01
+                  collector_version: 0.1.0-SNAPSHOT
+                  last_applied_config_version: 11
+      responses:
+        "200":
+          description: 返回一个需要该采集端幂等处理的任务。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobEnvelope"
+              examples:
+                pauseCollection:
+                  $ref: "#/components/examples/PauseCollectionJob"
+                resumeCollection:
+                  $ref: "#/components/examples/ResumeCollectionJob"
+                setOutboxQuota:
+                  $ref: "#/components/examples/SetOutboxQuotaJob"
+        "204":
+          description: 当前没有待领取任务。
+        "400":
+          $ref: "#/components/responses/ContractError"
+        "401":
+          $ref: "#/components/responses/AuthenticationError"
+        "403":
+          $ref: "#/components/responses/AuthorizationError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+        "429":
+          $ref: "#/components/responses/RateLimitError"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/ServerError"
+  "/collector/v1/jobs/{job_id}/status":
+    post:
+      operationId: reportCollectorJobStatus
+      summary: 回传控制任务执行状态
+      description: 相同 job_id、状态和内容的重复回传是幂等操作；终态不能回退为非终态。
+      security:
+        - mutualTLS: []
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/Identifier"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobStatusUpdate"
+            examples:
+              quotaApplied:
+                $ref: "#/components/examples/QuotaAppliedStatus"
+              staleVersionRejected:
+                $ref: "#/components/examples/StaleVersionRejectedStatus"
+      responses:
+        "200":
+          description: 中控已记录该任务状态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ControlAcknowledgement"
+        "400":
+          $ref: "#/components/responses/ContractError"
+        "401":
+          $ref: "#/components/responses/AuthenticationError"
+        "403":
+          $ref: "#/components/responses/AuthorizationError"
+        "404":
+          description: job_id 不存在或不属于该采集端。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ControlError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+        "422":
+          $ref: "#/components/responses/ContractError"
+        "429":
+          $ref: "#/components/responses/RateLimitError"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/ServerError"
+  "/collector/v1/status":
+    post:
+      operationId: reportCollectorStatus
+      summary: 上报采集节点最新状态快照
+      description: 状态是可覆盖的最新快照，不进入业务 Outbox；中控按服务端 received_at 判断在线状态。
+      security:
+        - mutualTLS: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectorStatusSnapshot"
+            examples:
+              running:
+                $ref: "#/components/examples/RunningCollectorStatus"
+      responses:
+        "200":
+          description: 中控已接收最新状态快照；不表示任何采集数据已提交。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusAcknowledgement"
+        "400":
+          $ref: "#/components/responses/ContractError"
+        "401":
+          $ref: "#/components/responses/AuthenticationError"
+        "403":
+          $ref: "#/components/responses/AuthorizationError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+        "422":
+          $ref: "#/components/responses/ContractError"
+        "429":
+          $ref: "#/components/responses/RateLimitError"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/ServerError"
+components:
+  securitySchemes:
+    mutualTLS:
+      type: mutualTLS
+      description: 中控将客户端证书身份与 collector_id 和 site_id 绑定校验。
+  responses:
+    ContractError:
+      description: 请求格式、Schema 或字段语义错误。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ControlError"
+    AuthenticationError:
+      description: 未建立可信 mTLS 客户端身份。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ControlError"
+    AuthorizationError:
+      description: 证书身份与 collector_id/site_id 不匹配或无权访问目标任务。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ControlError"
+    ConflictError:
+      description: job_id、配置版本、身份或状态转换发生冲突。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ControlError"
+    RateLimitError:
+      description: 请求被限流，Retry-After 使用整数秒。
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 0
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ControlError"
+    ServerError:
+      description: 中控暂时不可用；采集端保持最后一次有效策略并重试。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ControlError"
+  examples:
+    PauseCollectionJob:
+      value:
+        schema_version: "1.0"
+        job_id: job-pause-001
+        collector_id: aliyun-collector-site01
+        site_id: site01
+        command_type: PAUSE_COLLECTION
+        config_version: 12
+        created_at: "2026-09-11T08:00:00Z"
+        expires_at: "2026-09-11T08:05:00Z"
+        parameters:
+          source_type: SLS
+          reason: planned-maintenance
+    ResumeCollectionJob:
+      value:
+        schema_version: "1.0"
+        job_id: job-resume-001
+        collector_id: aliyun-collector-site01
+        site_id: site01
+        command_type: RESUME_COLLECTION
+        config_version: 13
+        created_at: "2026-09-11T08:10:00Z"
+        expires_at: "2026-09-11T08:15:00Z"
+        parameters:
+          source_type: SLS
+    SetOutboxQuotaJob:
+      value:
+        schema_version: "1.0"
+        job_id: job-quota-001
+        collector_id: aliyun-collector-site01
+        site_id: site01
+        command_type: SET_OUTBOX_QUOTA
+        config_version: 14
+        created_at: "2026-09-11T08:20:00Z"
+        expires_at: "2026-09-11T08:25:00Z"
+        parameters:
+          requested_quota_bytes: 10737418240
+    QuotaAppliedStatus:
+      value:
+        schema_version: "1.0"
+        job_id: job-quota-001
+        collector_id: aliyun-collector-site01
+        site_id: site01
+        command_type: SET_OUTBOX_QUOTA
+        config_version: 14
+        status: SUCCEEDED
+        occurred_at: "2026-09-11T08:20:02Z"
+        requested_quota_bytes: 10737418240
+        effective_quota_bytes: 10737418240
+        local_min_bytes: 1073741824
+        local_max_bytes: 21474836480
+    StaleVersionRejectedStatus:
+      value:
+        schema_version: "1.0"
+        job_id: job-quota-stale-001
+        collector_id: aliyun-collector-site01
+        site_id: site01
+        command_type: SET_OUTBOX_QUOTA
+        config_version: 9
+        status: REJECTED
+        occurred_at: "2026-09-11T08:21:00Z"
+        requested_quota_bytes: 5368709120
+        effective_quota_bytes: 9663676416
+        local_min_bytes: 1073741824
+        local_max_bytes: 21474836480
+        reject_reason: STALE_CONFIG_VERSION
+        message: supplied config version is older than the applied version
+    RunningCollectorStatus:
+      value:
+        schema_version: "1.0"
+        collector_id: aliyun-collector-site01
+        site_id: site01
+        collector_type: ALIYUN
+        collector_version: 0.1.0-SNAPSHOT
+        deployment_mode: PRODUCTION
+        started_at: "2026-09-11T07:00:00Z"
+        sent_at: "2026-09-11T08:30:00Z"
+        config_version: 14
+        overall_status: RUNNING
+        status_reasons: []
+        sources:
+          - source_type: SLS
+            enabled: true
+            state: RUNNING
+            last_success_at: "2026-09-11T08:29:40Z"
+            consecutive_failures: 0
+            collection_lag_seconds: 50
+            watermarks:
+              - source_key: project-a/logstore-b
+                window_end: "2026-09-11T08:29:30Z"
+                updated_at: "2026-09-11T08:29:41Z"
+        upload:
+          state: RUNNING
+          in_flight_batches: 1
+          pending:
+            count: 2
+            bytes: 1048576
+            oldest_age_seconds: 8
+          retry:
+            count: 1
+            bytes: 524288
+            oldest_age_seconds: 30
+          blocked:
+            count: 0
+            bytes: 0
+            oldest_age_seconds: 0
+          watermarks:
+            - poll_id: poll-001
+              contiguous_batch_sequence: 2
+              complete: false
+              updated_at: "2026-09-11T08:29:45Z"
+        capacity:
+          state: NORMAL
+          reasons: []
+          pvc_total_bytes: 21474836480
+          pvc_usable_bytes: 16106127360
+          pvc_used_bytes: 5368709120
+          pvc_used_percent: 25.0
+          outbox_used_bytes: 1572864
+          requested_quota_bytes: 10737418240
+          effective_quota_bytes: 10737418240
+          local_min_bytes: 1073741824
+          local_max_bytes: 21474836480
+          reserved_free_bytes: 1073741824
+          quota_used_percent: 0.02
+  schemas:
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    SchemaVersion:
+      type: string
+      const: "1.0"
+    CommandType:
+      type: string
+      enum: [PAUSE_COLLECTION, RESUME_COLLECTION, SET_OUTBOX_QUOTA]
+    ReportedCommandType:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[A-Z][A-Z0-9_]*$"
+      description: 回传任务状态时原样携带命令名；允许回传未识别的名称并以 UNKNOWN_COMMAND 拒绝，但不扩大可执行命令白名单。
+    SourceType:
+      type: string
+      enum: [ARMS, SLS]
+    JobExecutionStatus:
+      type: string
+      enum: [RECEIVED, RUNNING, SUCCEEDED, FAILED, REJECTED]
+    OverallStatus:
+      type: string
+      enum: [RUNNING, PAUSED, DEGRADED]
+    ComponentState:
+      type: string
+      enum: [RUNNING, PAUSED, DEGRADED, DISABLED]
+    CapacityState:
+      type: string
+      enum: [NORMAL, WARNING, CRITICAL, RECOVERING]
+    StatusReason:
+      type: string
+      enum:
+        - MANUAL_PAUSE
+        - PHYSICAL_CAPACITY_CRITICAL
+        - LOGICAL_QUOTA_CRITICAL
+        - UPLOAD_AUTHENTICATION_PAUSED
+        - CONFIG_INVALID
+        - CAPACITY_CHECK_FAILED
+        - COLLECTION_DEGRADED
+        - UPLOAD_DEGRADED
+    RejectReason:
+      type: string
+      enum:
+        - QUOTA_BELOW_LOCAL_MIN
+        - QUOTA_ABOVE_LOCAL_MAX
+        - PVC_SAFETY_LIMIT
+        - STALE_CONFIG_VERSION
+        - EXPIRED_JOB
+        - UNKNOWN_COMMAND
+        - INVALID_PARAMETERS
+        - IDENTITY_MISMATCH
+        - POLICY_STATE_CORRUPTED
+        - JOB_ID_CONFLICT
+        - INTERNAL_ERROR
+    JobClaimRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - collector_id
+        - site_id
+        - collector_version
+        - last_applied_config_version
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        collector_id:
+          $ref: "#/components/schemas/Identifier"
+        site_id:
+          $ref: "#/components/schemas/Identifier"
+        collector_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        last_applied_config_version:
+          type: integer
+          format: int64
+          minimum: 0
+        last_completed_job_id:
+          $ref: "#/components/schemas/Identifier"
+    JobEnvelope:
+      oneOf:
+        - $ref: "#/components/schemas/PauseCollectionJob"
+        - $ref: "#/components/schemas/ResumeCollectionJob"
+        - $ref: "#/components/schemas/SetOutboxQuotaJob"
+      discriminator:
+        propertyName: command_type
+        mapping:
+          PAUSE_COLLECTION: "#/components/schemas/PauseCollectionJob"
+          RESUME_COLLECTION: "#/components/schemas/ResumeCollectionJob"
+          SET_OUTBOX_QUOTA: "#/components/schemas/SetOutboxQuotaJob"
+    JobEnvelopeBase:
+      type: object
+      required:
+        - schema_version
+        - job_id
+        - collector_id
+        - site_id
+        - config_version
+        - created_at
+        - expires_at
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        job_id:
+          $ref: "#/components/schemas/Identifier"
+        collector_id:
+          $ref: "#/components/schemas/Identifier"
+        site_id:
+          $ref: "#/components/schemas/Identifier"
+        config_version:
+          type: integer
+          format: int64
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+    PauseCollectionJob:
+      allOf:
+        - $ref: "#/components/schemas/JobEnvelopeBase"
+        - type: object
+          required: [command_type, parameters]
+          properties:
+            command_type:
+              type: string
+              const: PAUSE_COLLECTION
+            parameters:
+              $ref: "#/components/schemas/PauseCollectionParameters"
+      unevaluatedProperties: false
+    ResumeCollectionJob:
+      allOf:
+        - $ref: "#/components/schemas/JobEnvelopeBase"
+        - type: object
+          required: [command_type, parameters]
+          properties:
+            command_type:
+              type: string
+              const: RESUME_COLLECTION
+            parameters:
+              $ref: "#/components/schemas/ResumeCollectionParameters"
+      unevaluatedProperties: false
+    SetOutboxQuotaJob:
+      allOf:
+        - $ref: "#/components/schemas/JobEnvelopeBase"
+        - type: object
+          required: [command_type, parameters]
+          properties:
+            command_type:
+              type: string
+              const: SET_OUTBOX_QUOTA
+            parameters:
+              $ref: "#/components/schemas/SetOutboxQuotaParameters"
+      unevaluatedProperties: false
+    PauseCollectionParameters:
+      type: object
+      additionalProperties: false
+      properties:
+        source_type:
+          $ref: "#/components/schemas/SourceType"
+        reason:
+          type: string
+          maxLength: 256
+    ResumeCollectionParameters:
+      type: object
+      additionalProperties: false
+      properties:
+        source_type:
+          $ref: "#/components/schemas/SourceType"
+    SetOutboxQuotaParameters:
+      type: object
+      additionalProperties: false
+      required: [requested_quota_bytes]
+      properties:
+        requested_quota_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+    JobStatusUpdate:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - job_id
+        - collector_id
+        - site_id
+        - command_type
+        - config_version
+        - status
+        - occurred_at
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        job_id:
+          $ref: "#/components/schemas/Identifier"
+        collector_id:
+          $ref: "#/components/schemas/Identifier"
+        site_id:
+          $ref: "#/components/schemas/Identifier"
+        command_type:
+          $ref: "#/components/schemas/ReportedCommandType"
+        config_version:
+          type: integer
+          format: int64
+          minimum: 1
+        status:
+          $ref: "#/components/schemas/JobExecutionStatus"
+        occurred_at:
+          type: string
+          format: date-time
+        requested_quota_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        effective_quota_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        local_min_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        local_max_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        reject_reason:
+          $ref: "#/components/schemas/RejectReason"
+        message:
+          type: string
+          maxLength: 512
+      allOf:
+        - if:
+            required: [command_type]
+            properties:
+              command_type:
+                const: SET_OUTBOX_QUOTA
+          then:
+            required:
+              - requested_quota_bytes
+              - effective_quota_bytes
+              - local_min_bytes
+              - local_max_bytes
+        - if:
+            required: [status]
+            properties:
+              status:
+                const: REJECTED
+          then:
+            required: [reject_reason]
+    ControlAcknowledgement:
+      type: object
+      additionalProperties: false
+      required: [schema_version, job_id, accepted_status, received_at]
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        job_id:
+          $ref: "#/components/schemas/Identifier"
+        accepted_status:
+          $ref: "#/components/schemas/JobExecutionStatus"
+        received_at:
+          type: string
+          format: date-time
+    CollectorStatusSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - schema_version
+        - collector_id
+        - site_id
+        - collector_type
+        - collector_version
+        - deployment_mode
+        - started_at
+        - sent_at
+        - config_version
+        - overall_status
+        - status_reasons
+        - sources
+        - upload
+        - capacity
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        collector_id:
+          $ref: "#/components/schemas/Identifier"
+        site_id:
+          $ref: "#/components/schemas/Identifier"
+        collector_type:
+          type: string
+          const: ALIYUN
+        collector_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        deployment_mode:
+          type: string
+          enum: [DEVELOPMENT, PRODUCTION]
+        started_at:
+          type: string
+          format: date-time
+        sent_at:
+          type: string
+          format: date-time
+        config_version:
+          type: integer
+          format: int64
+          minimum: 0
+        overall_status:
+          $ref: "#/components/schemas/OverallStatus"
+        status_reasons:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/StatusReason"
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/SourceStatus"
+        upload:
+          $ref: "#/components/schemas/UploadStatus"
+        capacity:
+          $ref: "#/components/schemas/CapacityStatus"
+        last_job:
+          $ref: "#/components/schemas/JobSummary"
+    SourceStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - source_type
+        - enabled
+        - state
+        - consecutive_failures
+        - collection_lag_seconds
+        - watermarks
+      properties:
+        source_type:
+          $ref: "#/components/schemas/SourceType"
+        enabled:
+          type: boolean
+        state:
+          $ref: "#/components/schemas/ComponentState"
+        last_success_at:
+          type: string
+          format: date-time
+        last_failure_at:
+          type: string
+          format: date-time
+        consecutive_failures:
+          type: integer
+          minimum: 0
+        collection_lag_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+        watermarks:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollectionWatermarkStatus"
+    CollectionWatermarkStatus:
+      type: object
+      additionalProperties: false
+      required: [source_key, window_end, updated_at]
+      properties:
+        source_key:
+          type: string
+          minLength: 1
+          maxLength: 512
+        window_end:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    UploadStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - in_flight_batches
+        - pending
+        - retry
+        - blocked
+        - watermarks
+      properties:
+        state:
+          $ref: "#/components/schemas/ComponentState"
+        last_success_at:
+          type: string
+          format: date-time
+        in_flight_batches:
+          type: integer
+          minimum: 0
+        pending:
+          $ref: "#/components/schemas/BacklogStatus"
+        retry:
+          $ref: "#/components/schemas/BacklogStatus"
+        blocked:
+          $ref: "#/components/schemas/BacklogStatus"
+        watermarks:
+          type: array
+          items:
+            $ref: "#/components/schemas/UploadWatermarkStatus"
+    BacklogStatus:
+      type: object
+      additionalProperties: false
+      required: [count, bytes, oldest_age_seconds]
+      properties:
+        count:
+          type: integer
+          format: int64
+          minimum: 0
+        bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        oldest_age_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+    UploadWatermarkStatus:
+      type: object
+      additionalProperties: false
+      required: [poll_id, contiguous_batch_sequence, complete, updated_at]
+      properties:
+        poll_id:
+          $ref: "#/components/schemas/Identifier"
+        contiguous_batch_sequence:
+          type: integer
+          minimum: -1
+        complete:
+          type: boolean
+        updated_at:
+          type: string
+          format: date-time
+    CapacityStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - state
+        - reasons
+        - pvc_total_bytes
+        - pvc_usable_bytes
+        - pvc_used_bytes
+        - pvc_used_percent
+        - outbox_used_bytes
+        - requested_quota_bytes
+        - effective_quota_bytes
+        - local_min_bytes
+        - local_max_bytes
+        - reserved_free_bytes
+        - quota_used_percent
+      properties:
+        state:
+          $ref: "#/components/schemas/CapacityState"
+        reasons:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/StatusReason"
+        pvc_total_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        pvc_usable_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        pvc_used_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        pvc_used_percent:
+          type: number
+          minimum: 0
+          maximum: 100
+        outbox_used_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        requested_quota_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        effective_quota_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        local_min_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        local_max_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+        reserved_free_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+        quota_used_percent:
+          type: number
+          minimum: 0
+    JobSummary:
+      type: object
+      additionalProperties: false
+      required: [job_id, command_type, config_version, status, occurred_at]
+      properties:
+        job_id:
+          $ref: "#/components/schemas/Identifier"
+        command_type:
+          $ref: "#/components/schemas/ReportedCommandType"
+        config_version:
+          type: integer
+          format: int64
+          minimum: 1
+        status:
+          $ref: "#/components/schemas/JobExecutionStatus"
+        occurred_at:
+          type: string
+          format: date-time
+        reject_reason:
+          $ref: "#/components/schemas/RejectReason"
+    StatusAcknowledgement:
+      type: object
+      additionalProperties: false
+      required: [schema_version, collector_id, status, received_at]
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        collector_id:
+          $ref: "#/components/schemas/Identifier"
+        status:
+          type: string
+          const: ACCEPTED
+        received_at:
+          type: string
+          format: date-time
+    ControlError:
+      type: object
+      additionalProperties: false
+      required: [schema_version, reason_code, message, occurred_at]
+      properties:
+        schema_version:
+          $ref: "#/components/schemas/SchemaVersion"
+        reason_code:
+          type: string
+          maxLength: 128
+        message:
+          type: string
+          maxLength: 512
+        occurred_at:
+          type: string
+          format: date-time

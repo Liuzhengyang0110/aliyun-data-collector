@@ -9,6 +9,9 @@ import cn.kjky.collector.output.CheckpointStore;
 import cn.kjky.collector.output.OutputSession;
 import cn.kjky.collector.pipeline.CollectionEventSink;
 import cn.kjky.collector.pipeline.CollectionTask;
+import cn.kjky.collector.pagination.PageGuard;
+import cn.kjky.collector.pagination.QuerySummary;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,18 +58,22 @@ public final class SlsCollector {
     public Map<String, SlsApi.ListResult> discover() throws Exception {
         Map<String, SlsApi.ListResult> result = new LinkedHashMap<>();
         for (var project : config.sls.projects) {
+            PageGuard guard = new PageGuard(config.pagination);
             int offset = 0;
             List<String> all = new java.util.ArrayList<>();
             String requestId = null;
             int total;
             do {
                 int current = offset;
-                SlsApi.ListResult page = retry.execute("SLS ListLogStores", () -> api.listLogstores(project.project, current, 100));
+                SlsApi.ListResult page = retry.execute("SLS/DISCOVER/" + project.project,
+                        () -> api.listLogstores(project.project, current, 100));
+                boolean complete = guard.accept(new ObjectMapper().valueToTree(page.logstores()), current, 100,
+                        new PageGuard.Metadata((long) page.total(), null, null, null, null));
                 all.addAll(page.logstores());
                 requestId = page.requestId();
                 total = page.total();
                 offset += page.logstores().size();
-                if (page.logstores().isEmpty()) break;
+                if (complete) break;
             } while (offset < total);
             result.put(project.project, new SlsApi.ListResult(all, all.size(), requestId));
         }
@@ -83,9 +90,11 @@ public final class SlsCollector {
     /** 采集一个 SLS Project/Logstore 任务。 */
     public void collectLogstoreTask(String project, CollectorConfig.SlsLogstore logstore,
                                     TimeWindow window) throws Exception {
+        // Deep copy once: concurrent configuration changes cannot alter a running window or page size.
+        logstore = new ObjectMapper().convertValue(logstore, CollectorConfig.SlsLogstore.class);
         long fromLong = window.start().getEpochSecond();
         long toLong = window.end().getEpochSecond() - 1;
-        if (fromLong < Integer.MIN_VALUE || fromLong > Integer.MAX_VALUE || toLong > Integer.MAX_VALUE) {
+        if (fromLong < Integer.MIN_VALUE || fromLong > Integer.MAX_VALUE || toLong < Integer.MIN_VALUE || toLong > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("SLS Java SDK v1 的秒级时间超出 int 范围");
         }
         int from = (int) fromLong;
@@ -94,45 +103,58 @@ public final class SlsCollector {
         if (done(doneKey)) return;
 
         String taskKey = CollectionTask.slsLogKey(project, logstore.logstore);
-        CollectionEventSink.TaskSession session = pipeline == null ? null
-                : pipeline.open(new CollectionTask(taskKey, "SLS", logstore.recordType, window.start(), window.end()));
-        long offset = 0;
-        while (true) {
-            String checkpointKey = "sls|" + project + "|" + logstore.logstore + "|" + window.start() + "|" + offset;
-            if (done(checkpointKey)) {
-                offset += logstore.pageSize;
-                continue;
+        try (QuerySummary summary = new QuerySummary(taskKey, window)) {
+            CollectionEventSink.TaskSession session = pipeline == null ? null
+                    : pipeline.open(new CollectionTask(taskKey, "SLS", logstore.recordType, window.start(), window.end()));
+            PageGuard guard = new PageGuard(config.pagination);
+            long offset = 0;
+            while (true) {
+                String checkpointKey = "sls|" + project + "|" + logstore.logstore + "|" + window.start() + "|" + offset;
+                // An incomplete checkpointed window is re-queried; never skip completeness guards.
+                SlsApi.QueryResult result = poll(project, logstore, from, to, offset, summary);
+                if (result.logs() == null) throw PageGuard.failure("INVALID_RECORDS");
+                summary.page(result.logs().size(), result.requestId());
+                boolean complete = guard.accept(new ObjectMapper().valueToTree(result.logs()), offset, logstore.pageSize,
+                        new PageGuard.Metadata(result.total(), result.offset(), result.hasMore(), null, null));
+                writeRaw(project, logstore, window, from, to, offset, result);
+                if (session != null) {
+                    NormalizationContext context = NormalizationContext.sls(taskKey, logstore.recordType,
+                            window.start(), window.end(), result.requestId(), fields(logstore.normalization, true),
+                            fields(logstore.normalization, false));
+                    for (SlsApi.LogRecord record : result.logs()) session.acceptAll(normalizer.normalize(record, context).events());
+                }
+                mark(checkpointKey);
+                int count = result.logs().size();
+                if (complete) break;
+                long nextOffset = Math.addExact(offset, count);
+                if (nextOffset <= offset) throw PageGuard.failure("OFFSET_NOT_ADVANCING");
+                offset = nextOffset;
             }
-            SlsApi.QueryResult result = poll(project, logstore, from, to, offset);
-            writeRaw(project, logstore, window, from, to, offset, result);
-            if (session != null) {
-                NormalizationContext context = NormalizationContext.sls(taskKey, logstore.recordType,
-                        window.start(), window.end(), result.requestId(), fields(logstore.normalization, true),
-                        fields(logstore.normalization, false));
-                for (SlsApi.LogRecord record : result.logs()) session.acceptAll(normalizer.normalize(record, context).events());
-            }
-            mark(checkpointKey);
-            int count = result.logs().size();
-            if (count < logstore.pageSize || count == 0) {
-                mark(doneKey);
-                break;
-            }
-            offset += count;
+            if (session != null) session.finish();
+            mark(doneKey);
+            summary.complete();
         }
-        if (session != null) session.finish();
     }
 
     private SlsApi.QueryResult poll(String project, CollectorConfig.SlsLogstore logstore,
-                                    int from, int to, long offset) throws Exception {
+                                    int from, int to, long offset, QuerySummary summary) throws Exception {
         SlsApi.QueryResult last = null;
         for (int attempt = 1; attempt <= config.runtime.maxPollAttempts; attempt++) {
             long currentOffset = offset;
-            last = retry.execute("SLS GetLogs", () -> api.getLogs(project, logstore.logstore, from, to,
-                    logstore.topic, logstore.query, currentOffset, logstore.pageSize, logstore.reverse));
+            try {
+                last = retry.execute(CollectionTask.slsLogKey(project, logstore.logstore) + "/GetLogs",
+                        () -> api.getLogs(project, logstore.logstore, from, to,
+                        logstore.topic, logstore.query, currentOffset, logstore.pageSize, logstore.reverse));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedException("SLS_QUERY_INTERRUPTED");
+            } catch (Exception e) { throw PageGuard.failure("SLS_QUERY_FAILED"); }
+            if (last == null) throw PageGuard.failure("INVALID_RESPONSE");
+            summary.request(last.requestId());
             if (last.completed()) return last;
             Thread.sleep(config.runtime.pollIntervalMillis);
         }
-        throw new IllegalStateException("SLS 查询在最大轮询次数内未完成: " + project + "/" + logstore.logstore);
+        throw PageGuard.failure("SLS_QUERY_INCOMPLETE");
     }
 
     private void writeRaw(String project, CollectorConfig.SlsLogstore logstore, TimeWindow window,

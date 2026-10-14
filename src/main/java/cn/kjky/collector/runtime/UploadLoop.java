@@ -130,6 +130,14 @@ public final class UploadLoop implements DaemonLoop {
         return started.get() && terminated.getCount() != 0;
     }
 
+    public int inFlightBatches() {
+        return uploader.inFlightBatches();
+    }
+
+    public Instant lastSuccessAt() {
+        return uploader.lastSuccessAt();
+    }
+
     boolean awaitTermination(Duration timeout) throws InterruptedException {
         return terminated.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
     }

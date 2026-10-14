@@ -46,6 +46,8 @@ public final class BatchUploader implements AutoCloseable {
     private final CommitHook commitHook;
     private final AtomicReference<UploaderStatus> status = new AtomicReference<>(UploaderStatus.active());
     private final AtomicReference<UploadWarning> lastWarning = new AtomicReference<>();
+    private final AtomicInteger inFlightBatches = new AtomicInteger();
+    private final AtomicReference<Instant> lastSuccessAt = new AtomicReference<>();
 
     /** 使用配置创建 IngestClient，连接超时和请求超时均直接来自 upload 节点。 */
     public BatchUploader(CollectorConfig config, OutboxStore outbox, UploadWatermarkStore watermarks) {
@@ -121,6 +123,16 @@ public final class BatchUploader implements AutoCloseable {
         return lastWarning.get();
     }
 
+    /** 当前已经进入工作线程、尚未完成状态迁移的批次数。 */
+    public int inFlightBatches() {
+        return inFlightBatches.get();
+    }
+
+    /** 最近一次批次完成可靠 ACK、水位落盘及本地提交删除的时间。 */
+    public Instant lastSuccessAt() {
+        return lastSuccessAt.get();
+    }
+
     /** 凭据修复后由外部明确恢复；不会修改或清空任何 Outbox 数据。 */
     public void resumeAfterAuthenticationRepair() {
         ensureOpen();
@@ -128,6 +140,15 @@ public final class BatchUploader implements AutoCloseable {
     }
 
     private BatchOutcome process(OutboxClaim claim) throws Exception {
+        inFlightBatches.incrementAndGet();
+        try {
+            return processClaim(claim);
+        } finally {
+            inFlightBatches.decrementAndGet();
+        }
+    }
+
+    private BatchOutcome processClaim(OutboxClaim claim) throws Exception {
         OutboxStoredBatch stored = claim.stored();
         IngestResult result;
         try {
@@ -157,12 +178,14 @@ public final class BatchUploader implements AutoCloseable {
             watermarks.acknowledge(UploadAcknowledgement.fromCommitted(stored.batch()));
             commitHook.afterWatermark(stored.batch());
             outbox.deleteCommitted(claim);
+            lastSuccessAt.set(clock.instant());
             return BatchOutcome.COMMITTED;
         }
 
         OutboxStoredBatch parent = outbox.acknowledgeSplitChild(parentBatchId, stored.batch().batchId());
         outbox.deleteCommitted(claim);
         if (parent.delivery().splitComplete()) finalizeCompletedSplits();
+        lastSuccessAt.set(clock.instant());
         return BatchOutcome.COMMITTED;
     }
 

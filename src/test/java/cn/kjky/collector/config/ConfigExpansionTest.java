@@ -23,6 +23,8 @@ class ConfigExpansionTest {
 
         assertThat(config.collector.collectorId).isEqualTo("aliyun-collector-test01");
         assertThat(config.scheduler.compensationIntervalSeconds).isEqualTo(600);
+        assertThat(config.runtime.retryMaxDelayMillis).isEqualTo(30000);
+        assertThat(config.runtime.retryJitterRatio).isEqualTo(0.2d);
         assertThat(config.upload.maxCompressedBytes).isEqualTo(2L * 1024 * 1024);
         assertThat(config.security.clientAuthMode).isEqualTo("KEYSTORE");
         assertThat(config.security.certificateExpiryWarningDays).isEqualTo(30);
@@ -30,7 +32,15 @@ class ConfigExpansionTest {
         assertThat(config.storage.outboxDir).isEqualTo("outbox");
         assertThat(config.storage.diskResumeWatermarkPercent).isEqualTo(75);
         assertThat(config.storage.diskCheckIntervalSeconds).isEqualTo(10);
+        assertThat(config.storage.outboxQuota.defaultBytes).isEqualTo(10L * 1024 * 1024 * 1024);
+        assertThat(config.storage.outboxQuota.minBytes).isEqualTo(1024L * 1024 * 1024);
+        assertThat(config.storage.outboxQuota.maxBytes).isEqualTo(20L * 1024 * 1024 * 1024);
+        assertThat(config.storage.outboxQuota.reservedFreeBytes).isEqualTo(1024L * 1024 * 1024);
         assertThat(config.control.taskPollIntervalSeconds).isEqualTo(10);
+        assertThat(config.control.taskPollJitterSeconds).isEqualTo(2);
+        assertThat(config.control.heartbeatIntervalSeconds).isEqualTo(30);
+        assertThat(config.control.statusChangeMinIntervalMillis).isEqualTo(1000);
+        assertThat(config.control.jobStatusUrl).contains("{job_id}");
         assertThat(config.effectiveDataRoot()).isEqualTo("./target/config-test-data");
         assertThat(validator.validate(config, false)).isEmpty();
     }
@@ -62,6 +72,9 @@ class ConfigExpansionTest {
         config.upload.retryMaxDelayMillis = 90_000_000;
         config.upload.retryJitterRatio = 1.1;
         config.upload.retryWarningAttempts = 0;
+        config.runtime.retryBaseMillis = 0;
+        config.runtime.retryMaxDelayMillis = 3_600_001;
+        config.runtime.retryJitterRatio = Double.NaN;
         config.storage.outboxDir = "../outside";
         config.storage.stateDir = "../state-outside";
         config.storage.diskWarningWatermarkPercent = 95;
@@ -81,6 +94,9 @@ class ConfigExpansionTest {
                 .contains("upload.retryMaxDelayMillis 必须不小于 retryInitialDelayMillis 且不大于 86400000")
                 .contains("upload.retryJitterRatio 必须在 0..1")
                 .contains("upload.retryWarningAttempts 必须在 1..1000000")
+                .contains("runtime.retryBaseMillis 必须在 1..60000")
+                .contains("runtime.retryMaxDelayMillis 必须不小于 retryBaseMillis 且不超过 3600000")
+                .contains("runtime.retryJitterRatio 必须在 0..1")
                 .contains("storage.outboxDir 必须是 dataRoot 内的相对路径，且不能包含越界跳转")
                 .contains("storage.stateDir 必须是 dataRoot 内的相对路径，且不能包含越界跳转")
                 .contains("storage 磁盘水位必须满足 diskResumeWatermarkPercent < diskWarningWatermarkPercent < diskCriticalWatermarkPercent")
@@ -106,6 +122,28 @@ class ConfigExpansionTest {
         assertThat(validator.validate(config, false))
                 .contains("storage.diskResumeWatermarkPercent 必须在 1..99")
                 .contains("storage.diskCheckIntervalSeconds 必须在 1..3600");
+    }
+
+    @Test
+    void rejectsInvalidOutboxQuotaBoundsThresholdsAndInterval() throws Exception {
+        CollectorConfig config = loadValid();
+        config.storage.outboxQuota.minBytes = 300;
+        config.storage.outboxQuota.defaultBytes = 200;
+        config.storage.outboxQuota.maxBytes = 100;
+        config.storage.outboxQuota.reservedFreeBytes = 0;
+        config.storage.outboxQuota.resumePercent = 90;
+        config.storage.outboxQuota.warningPercent = 80;
+        config.storage.outboxQuota.criticalPercent = 70;
+        config.storage.outboxQuota.checkIntervalSeconds = 0;
+
+        assertThat(validator.validate(config, false))
+                .contains("storage.outboxQuota.reservedFreeBytes 必须为正数")
+                .contains("storage.outboxQuota 必须满足 minBytes <= defaultBytes <= maxBytes")
+                .contains("storage.outboxQuota 水位必须满足 resumePercent < warningPercent < criticalPercent")
+                .contains("storage.outboxQuota.checkIntervalSeconds 必须在 1..3600");
+
+        config.storage.outboxQuota = null;
+        assertThat(validator.validate(config, false)).contains("storage.outboxQuota 不能为空");
     }
 
     @Test
@@ -151,6 +189,34 @@ class ConfigExpansionTest {
     }
 
     @Test
+    void productionControlRequiresOutboxModeMtlsAndFrozenEndpointPaths() throws Exception {
+        CollectorConfig config = loadValid();
+        config.control.enabled = true;
+        assertThat(validator.validate(config, false))
+                .contains("启用 control 时必须关闭 storage.rawPersistence.enabled，以便使用 Outbox 配额闭环");
+
+        config.runtime.deploymentMode = "PRODUCTION";
+        config.storage.rawPersistence.enabled = false;
+        config.security.mtlsEnabled = false;
+        assertThat(validator.validate(config, false))
+                .contains("PRODUCTION 模式启用中控任务时必须启用 security.mtlsEnabled");
+
+        config.security.mtlsEnabled = true;
+        config.control.jobStatusUrl = "https://cc-control.example.invalid/collector/v1/jobs/status";
+        assertThat(validator.validate(config, false))
+                .contains("control.jobStatusUrl 必须使用固定路径 /collector/v1/jobs/{job_id}/status，且不能包含查询参数或片段");
+
+        config.control.jobStatusUrl = "https://cc-control.example.invalid/collector/v1/jobs/{job_id}/status";
+        config.control.statusReportUrl = null;
+        assertThat(validator.validate(config, false)).contains("control.statusReportUrl 未配置");
+
+        config.control.statusReportUrl = "https://cc-control.example.invalid/collector/v1/status";
+        config.control.statusChangeMinIntervalMillis = 50;
+        assertThat(validator.validate(config, false))
+                .contains("control.statusChangeMinIntervalMillis 必须在 100..heartbeatIntervalSeconds*1000");
+    }
+
+    @Test
     void reportsMissingTopLevelSectionsInsteadOfThrowingNullPointer() throws Exception {
         CollectorConfig config = loadValid();
         config.collector = null;
@@ -183,6 +249,8 @@ class ConfigExpansionTest {
 
         assertThat(rpc.storage.dataRoot).isEqualTo("./data-package");
         assertThat(rpc.runtime.deploymentMode).isEqualTo("DEVELOPMENT");
+        assertThat(rpc.runtime.retryMaxDelayMillis).isEqualTo(30000);
+        assertThat(dataset.runtime.retryJitterRatio).isEqualTo(0.2d);
         assertThat(rpc.storage.rawPersistence.enabled).isTrue();
         assertThat(rpc.upload.maxRecords).isEqualTo(1000);
         assertThat(dataset.arms.mode).isEqualTo("DATASET");

@@ -1,72 +1,144 @@
 package cn.kjky.collector.core;
 
+import cn.kjky.collector.config.CollectorConfig;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
-/**
- * API 调用重试器。
- * 只重试网络、超时、限流和服务端错误，权限或参数错误会立即返回给调用者。
- */
+/** 云 API 查询专用重试器；不复用上传、控制或状态上报的策略及状态。 */
 public final class RetryExecutor {
-    /** 首次调用失败后最多重试的次数。 */
-    private final int maxRetries;
-    /** 指数退避的基础等待毫秒数。 */
-    private final long baseMillis;
+    private static final Logger LOGGER = Logger.getLogger(RetryExecutor.class.getName());
 
-    /**
-     * 创建重试器。
-     *
-     * @param maxRetries 最大重试次数，不包含第一次调用
-     * @param baseMillis 第一次重试前的基础等待时间
-     */
+    @FunctionalInterface public interface Sleeper { void sleep(Duration duration) throws InterruptedException; }
+    @FunctionalInterface public interface JitterSource { double nextDouble(); }
+    @FunctionalInterface public interface RetryObserver { void onFailure(RetryEvent event); }
+
+    /** 测试及安全日志可观察的脱敏事件。 */
+    public record RetryEvent(Instant timestamp, String system, String task, int attempt,
+                             QueryErrorCategory category, String safeReason,
+                             long nextWaitMillis, boolean willRetry) {}
+
+    private final String system;
+    private final int maxRetries;
+    private final long baseMillis;
+    private final long maxDelayMillis;
+    private final double jitterRatio;
+    private final Clock clock;
+    private final Sleeper sleeper;
+    private final JitterSource jitter;
+    private final RetryObserver observer;
+    private final CloudQueryErrorClassifier classifier;
+
+    /** 兼容原有测试和调用；生产代码应使用 {@link #forCloud(String, CollectorConfig.RuntimeConfig)}。 */
     public RetryExecutor(int maxRetries, long baseMillis) {
+        this("CLOUD", maxRetries, baseMillis, 30_000L, 0d, Clock.systemUTC(),
+                duration -> Thread.sleep(duration.toMillis()), () -> ThreadLocalRandom.current().nextDouble(),
+                RetryExecutor::logEvent, new CloudQueryErrorClassifier());
+    }
+
+    public RetryExecutor(String system, int maxRetries, long baseMillis, long maxDelayMillis,
+                         double jitterRatio, Clock clock, Sleeper sleeper, JitterSource jitter,
+                         RetryObserver observer, CloudQueryErrorClassifier classifier) {
+        if (maxRetries < 0) throw new IllegalArgumentException("maxRetries 不能小于 0");
+        if (baseMillis < 0 || maxDelayMillis < 0 || maxDelayMillis < baseMillis) {
+            throw new IllegalArgumentException("退避时间边界无效");
+        }
+        if (jitterRatio < 0d || jitterRatio > 1d) throw new IllegalArgumentException("jitterRatio 必须在 0..1");
+        this.system = Objects.requireNonNull(system, "system");
         this.maxRetries = maxRetries;
         this.baseMillis = baseMillis;
+        this.maxDelayMillis = maxDelayMillis;
+        this.jitterRatio = jitterRatio;
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.sleeper = Objects.requireNonNull(sleeper, "sleeper");
+        this.jitter = Objects.requireNonNull(jitter, "jitter");
+        this.observer = Objects.requireNonNull(observer, "observer");
+        this.classifier = Objects.requireNonNull(classifier, "classifier");
     }
 
-    /**
-     * 执行可能失败的操作，并对可恢复异常进行指数退避重试。
-     *
-     * @param operation 操作名称，仅用于最终错误信息，不包含敏感数据
-     * @param call 实际 API 调用或 I/O 操作
-     * @param <T> 调用返回值类型
-     * @return 成功调用的返回值
-     * @throws Exception 不可重试，或达到最大重试次数后的最后一个异常
-     */
-    public <T> T execute(String operation, Callable<T> call) throws Exception {
-        // last 保存最近一次异常，理论上仅用于循环后的防御性异常分支。
-        Exception last = null;
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+    /** 为一个外部云系统创建独立、无共享可变状态的重试器。 */
+    public static RetryExecutor forCloud(String system, CollectorConfig.RuntimeConfig runtime) {
+        return new RetryExecutor(system, runtime.maxRetries, runtime.retryBaseMillis,
+                runtime.retryMaxDelayMillis, runtime.retryJitterRatio, Clock.systemUTC(),
+                duration -> Thread.sleep(duration.toMillis()), () -> ThreadLocalRandom.current().nextDouble(),
+                RetryExecutor::logEvent, new CloudQueryErrorClassifier());
+    }
+
+    /** 达到上限或遇到不可重试/鉴权错误时原样抛出，由窗口层阻止水位推进。 */
+    public <T> T execute(String task, Callable<T> call) throws Exception {
+        for (int attempt = 1; attempt <= maxRetries + 1; attempt++) {
             try {
                 return call.call();
-            } catch (Exception e) {
-                last = e;
-                if (!isRetryable(e) || attempt == maxRetries) throw e;
-                // attempt 控制 1、2、4... 倍退避；单次等待上限为 30 秒。
-                Thread.sleep(Math.min(baseMillis * (1L << Math.min(attempt, 8)), 30_000L));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw e;
+            } catch (Exception failure) {
+                CloudQueryErrorClassifier.Classification classified = classifier.classify(failure);
+                boolean retry = classified.retryable() && attempt <= maxRetries;
+                long wait = retry ? delayMillis(attempt, classified.retryAfter()) : 0L;
+                observer.onFailure(new RetryEvent(clock.instant(), system, task, attempt,
+                        classified.category(), classified.safeReason(), wait, retry));
+                if (!retry) throw failure;
+                sleeper.sleep(Duration.ofMillis(wait));
             }
         }
-        throw new IllegalStateException(operation + " 重试失败", last);
+        throw new IllegalStateException("查询重试循环异常退出");
     }
 
-    /**
-     * 判断异常是否适合重试。
-     *
-     * @param e SDK、HTTP 或 I/O 调用抛出的异常
-     * @return true 表示异常可能是暂时性的；false 表示应立即失败
-     */
-    private boolean isRetryable(Exception e) {
-        if (e instanceof com.aliyun.openservices.log.exception.LogException le) {
-            // status 是 SLS 返回的 HTTP 状态码；0 通常表示尚未获得 HTTP 响应。
-            int status = le.GetHttpCode();
-            return status == 0 || status == 408 || status == 429 || status >= 500;
+    /** 第 n 次失败后的等待：min(max, base*2^(n-1))，随后施加对称抖动。 */
+    public long delayMillis(int failedAttempt, String retryAfter) {
+        if (failedAttempt < 1) throw new IllegalArgumentException("failedAttempt 必须大于 0");
+        Long serverDelay = parseRetryAfterMillis(retryAfter);
+        if (serverDelay != null) return Math.min(maxDelayMillis, Math.max(0L, serverDelay));
+        long exponential = cappedExponential(failedAttempt);
+        if (exponential == 0L || jitterRatio == 0d) return exponential;
+        double random = Math.max(0d, Math.min(1d, jitter.nextDouble()));
+        double factor = 1d - jitterRatio + random * (2d * jitterRatio);
+        return Math.min(maxDelayMillis, Math.max(0L, Math.round(exponential * factor)));
+    }
+
+    private long cappedExponential(int failedAttempt) {
+        long delay = baseMillis;
+        for (int i = 1; i < failedAttempt && delay < maxDelayMillis; i++) {
+            delay = delay > maxDelayMillis / 2 ? maxDelayMillis : delay * 2;
         }
-        if (e instanceof com.aliyuncs.exceptions.ClientException ce) {
-            // code 是阿里云核心 SDK 的错误码，通过关键词识别暂时性错误。
-            String code = ce.getErrCode();
-            if (code == null) return true;
-            String lower = code.toLowerCase();
-            return lower.contains("timeout") || lower.contains("throttl") || lower.contains("server") || lower.contains("network");
+        return Math.min(delay, maxDelayMillis);
+    }
+
+    private Long parseRetryAfterMillis(String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            return Math.multiplyExact(Math.max(0L, Long.parseLong(value.trim())), 1000L);
+        } catch (NumberFormatException | ArithmeticException ignored) {
+            try {
+                Instant retryAt = ZonedDateTime.parse(value.trim(), DateTimeFormatter.RFC_1123_DATE_TIME).toInstant();
+                return Math.max(0L, Duration.between(clock.instant(), retryAt).toMillis());
+            } catch (DateTimeParseException ignoredDate) {
+                return null;
+            }
         }
-        return e instanceof java.io.IOException || e instanceof java.net.http.HttpTimeoutException;
+    }
+
+    private static void logEvent(RetryEvent event) {
+        Level level = event.willRetry() ? Level.WARNING : Level.SEVERE;
+        LOGGER.log(level, () -> "cloud_query_failure system=" + event.system()
+                + " task=" + safeTask(event.task()) + " attempt=" + event.attempt()
+                + " category=" + event.category() + " reason=" + event.safeReason()
+                + " next_wait_ms=" + event.nextWaitMillis());
+    }
+
+    private static String safeTask(String task) {
+        if (task == null) return "unknown";
+        String sanitized = task.replaceAll("[^A-Za-z0-9_.:/ -]", "_");
+        return sanitized.length() <= 160 ? sanitized : sanitized.substring(0, 160);
     }
 }

@@ -23,10 +23,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 
 /**
  * 顶层业务编排器。
@@ -35,8 +39,10 @@ import java.util.Map;
 public final class CollectorEngine {
     /** 当前命令使用的完整配置。 */
     private final CollectorConfig config;
-    /** ARMS 和 SLS 共用的重试策略。 */
-    private final RetryExecutor retry;
+    /** ARMS 查询独立重试器，不与 SLS/上传/控制/状态共享退避状态。 */
+    private final RetryExecutor armsRetry;
+    /** SLS 查询独立重试器，不与 ARMS/上传/控制/状态共享退避状态。 */
+    private final RetryExecutor slsRetry;
     /** 创建 API 客户端时使用的环境变量凭据读取器。 */
     private final SecretResolver secrets = new SecretResolver();
     /** 用于命令行输出格式化 JSON。 */
@@ -53,6 +59,8 @@ public final class CollectorEngine {
     private ProductionPipeline productionPipeline;
     /** daemon 的采集和上传循环必须共享同一实例，保证进程内批次认领互斥。 */
     private OutboxStore daemonOutbox;
+    /** 每个生产查询窗口开始前复核物理容量与逻辑配额；非 daemon 调用默认放行。 */
+    private volatile Predicate<CollectionSource> productionCollectionGate = ignored -> true;
 
     /**
      * 根据运行配置创建编排器。
@@ -61,7 +69,9 @@ public final class CollectorEngine {
      */
     public CollectorEngine(CollectorConfig config) {
         this.config = config;
-        this.retry = new RetryExecutor(config.runtime.maxRetries, config.runtime.retryBaseMillis);
+        this.armsRetry = RetryExecutor.forCloud(
+                "DATASET".equalsIgnoreCase(config.arms.mode) ? "ARMS_DATASET" : "ARMS_RPC", config.runtime);
+        this.slsRetry = RetryExecutor.forCloud("SLS", config.runtime);
     }
 
     /**
@@ -75,12 +85,12 @@ public final class CollectorEngine {
         Map<String, Object> result = new LinkedHashMap<>();
         if (config.arms.enabled) try (ArmsApi api = armsApi()) {
             if ("RPC".equalsIgnoreCase(config.arms.mode)) {
-                var response = new ArmsCollector(config, api, retry, null, null).discover();
+                var response = new ArmsCollector(config, api, armsRetry, null, null).discover();
                 result.put("arms", json.readTree(response.body()));
             } else result.put("arms", "DATASET 模式没有应用发现接口，请按现场文档填写 datasetId");
         }
         if (config.sls.enabled) try (SlsApi api = new SlsSdkApi(config.sls, secrets)) {
-            result.put("sls", new SlsCollector(config, api, retry, null, null).discover());
+            result.put("sls", new SlsCollector(config, api, slsRetry, null, null).discover());
         }
         return json.writeValueAsString(result);
     }
@@ -109,11 +119,11 @@ public final class CollectorEngine {
         // result 只返回状态和 Request ID，不把探测数据正文打印到终端。
         Map<String, Object> result = new LinkedHashMap<>();
         try (ArmsApi api = armsApi()) {
-            ArmsApi.ApiResponse response = retry.execute("ARMS Dataset probe", () -> api.call("QueryDataset", parameters));
+            ArmsApi.ApiResponse response = armsRetry.execute("ARMS Dataset probe", () -> api.call("QueryDataset", parameters));
             result.put("arms", Map.of("mode", "DATASET", "httpStatus", response.httpStatus(), "requestId", response.requestId() == null ? "" : response.requestId()));
         }
         if (config.sls.enabled) try (SlsApi api = new SlsSdkApi(config.sls, secrets)) {
-            result.put("sls", new SlsCollector(config, api, retry, null, null).discover());
+            result.put("sls", new SlsCollector(config, api, slsRetry, null, null).discover());
         }
         return json.writeValueAsString(result);
     }
@@ -205,6 +215,22 @@ public final class CollectorEngine {
         }
     }
 
+    /** 返回生产采集链路正在使用的任务级水位 Store，供只读状态快照复用。 */
+    public CollectionWatermarkStore productionWatermarks() throws Exception {
+        return productionPipeline().watermarks();
+    }
+
+    /** 由生产 daemon 在启动前绑定双重容量门禁，不包含任何远程控制逻辑。 */
+    public void configureProductionCollectionGate(BooleanSupplier gate) {
+        Objects.requireNonNull(gate, "gate 不能为空");
+        this.productionCollectionGate = ignored -> gate.getAsBoolean();
+    }
+
+    /** 绑定支持 ARMS/SLS 分源暂停的组合门禁。 */
+    public void configureProductionCollectionGate(Predicate<CollectionSource> gate) {
+        this.productionCollectionGate = Objects.requireNonNull(gate, "gate 不能为空");
+    }
+
     /** 执行选择后的数据源集合，只有全部窗口成功才正常返回。 */
     private void collectSelected(Instant start, Instant end, boolean collectArms, boolean collectSls,
                                  OutputSession output, CheckpointStore checkpoint) throws Exception {
@@ -214,8 +240,8 @@ public final class CollectorEngine {
         try (ArmsApi arms = collectArms ? armsApi() : null;
              SlsApi sls = collectSls ? new SlsSdkApi(config.sls, secrets) : null) {
             // 未启用的数据源对应采集器为 null，窗口循环中直接跳过。
-            ArmsCollector armsCollector = arms == null ? null : new ArmsCollector(config, arms, retry, output, checkpoint);
-            SlsCollector slsCollector = sls == null ? null : new SlsCollector(config, sls, retry, output, checkpoint);
+            ArmsCollector armsCollector = arms == null ? null : new ArmsCollector(config, arms, armsRetry, output, checkpoint);
+            SlsCollector slsCollector = sls == null ? null : new SlsCollector(config, sls, slsRetry, output, checkpoint);
             for (TimeWindow window : windows) {
                 try {
                     // 每个窗口固定先 ARMS 后 SLS，便于根据日志定位中断位置。
@@ -250,19 +276,19 @@ public final class CollectorEngine {
     /** 在指定范围运行所有 ARMS 任务。 */
     private void collectProductionArms(ProductionPipeline pipeline, Instant start, Instant end) throws Exception {
         try (ArmsApi api = armsApi()) {
-            ArmsCollector collector = new ArmsCollector(config, api, retry, null, null, pipeline.sink());
+            ArmsCollector collector = new ArmsCollector(config, api, armsRetry, null, null, pipeline.sink());
             if ("DATASET".equalsIgnoreCase(config.arms.mode)) {
                 for (var query : config.arms.dataset.queries) {
-                    runProductionTask(CollectionTask.armsDatasetKey(query.name), start, end,
+                    runProductionTask(CollectionSource.ARMS, CollectionTask.armsDatasetKey(query.name), start, end,
                             window -> collector.collectDatasetTask(query, window));
                 }
             } else {
                 for (var query : config.arms.traceQueries) {
-                    runProductionTask(CollectionTask.armsTraceKey(query.name), start, end,
+                    runProductionTask(CollectionSource.ARMS, CollectionTask.armsTraceKey(query.name), start, end,
                             window -> collector.collectTraceTask(query, window));
                 }
                 for (var query : config.arms.metricQueries) {
-                    runProductionTask(CollectionTask.armsMetricKey(query.name), start, end,
+                    runProductionTask(CollectionSource.ARMS, CollectionTask.armsMetricKey(query.name), start, end,
                             window -> collector.collectMetricTask(query, window));
                 }
             }
@@ -272,10 +298,10 @@ public final class CollectorEngine {
     /** 在指定范围运行所有 SLS Project/Logstore 任务。 */
     private void collectProductionSls(ProductionPipeline pipeline, Instant start, Instant end) throws Exception {
         try (SlsApi api = new SlsSdkApi(config.sls, secrets)) {
-            SlsCollector collector = new SlsCollector(config, api, retry, null, null, pipeline.sink());
+            SlsCollector collector = new SlsCollector(config, api, slsRetry, null, null, pipeline.sink());
             for (var project : config.sls.projects) {
                 for (var logstore : project.logstores) {
-                    runProductionTask(CollectionTask.slsLogKey(project.project, logstore.logstore), start, end,
+                    runProductionTask(CollectionSource.SLS, CollectionTask.slsLogKey(project.project, logstore.logstore), start, end,
                             window -> collector.collectLogstoreTask(project.project, logstore, window));
                 }
             }
@@ -286,7 +312,7 @@ public final class CollectorEngine {
     private void collectProductionArmsFromWatermarks(ProductionPipeline pipeline, Instant end,
                                                       int initialLookbackSeconds) throws Exception {
         try (ArmsApi api = armsApi()) {
-            ArmsCollector collector = new ArmsCollector(config, api, retry, null, null, pipeline.sink());
+            ArmsCollector collector = new ArmsCollector(config, api, armsRetry, null, null, pipeline.sink());
             if ("DATASET".equalsIgnoreCase(config.arms.mode)) {
                 for (var query : config.arms.dataset.queries) {
                     runProductionTaskFromWatermark(pipeline, CollectionTask.armsDatasetKey(query.name), end,
@@ -309,7 +335,7 @@ public final class CollectorEngine {
     private void collectProductionSlsFromWatermarks(ProductionPipeline pipeline, Instant end,
                                                      int initialLookbackSeconds) throws Exception {
         try (SlsApi api = new SlsSdkApi(config.sls, secrets)) {
-            SlsCollector collector = new SlsCollector(config, api, retry, null, null, pipeline.sink());
+            SlsCollector collector = new SlsCollector(config, api, slsRetry, null, null, pipeline.sink());
             for (var project : config.sls.projects) {
                 for (var logstore : project.logstores) {
                     runProductionTaskFromWatermark(pipeline, CollectionTask.slsLogKey(project.project, logstore.logstore), end,
@@ -320,10 +346,15 @@ public final class CollectorEngine {
     }
 
     /** 对一个任务执行指定范围内的逻辑窗口。 */
-    private void runProductionTask(String taskKey, Instant start, Instant end,
+    private void runProductionTask(CollectionSource source, String taskKey, Instant start, Instant end,
                                    ProductionTaskCollector collector) throws Exception {
         if (!start.isBefore(end)) return;
-        for (TimeWindow window : new WindowPlanner().split(start, end, config.runtime.windowSeconds)) collector.collect(window);
+        for (TimeWindow window : new WindowPlanner().split(start, end, config.runtime.windowSeconds)) {
+            if (!productionCollectionGate.test(source)) {
+                throw new IOException("人工暂停、容量 CRITICAL 或本地配置无效，未开始新的查询窗口");
+            }
+            collector.collect(window);
+        }
     }
 
     /** 首轮先锚定任务起点，随后按同一任务的最新成功窗口继续。 */
@@ -331,7 +362,8 @@ public final class CollectorEngine {
                                                 int initialLookbackSeconds,
                                                 ProductionTaskCollector collector) throws Exception {
         Instant start = pipeline.watermarks().startFor(taskKey, end.minusSeconds(initialLookbackSeconds));
-        runProductionTask(taskKey, start, end, collector);
+        CollectionSource source = taskKey.startsWith("ARMS/") ? CollectionSource.ARMS : CollectionSource.SLS;
+        runProductionTask(source, taskKey, start, end, collector);
     }
 
     /** 延迟创建生产 Outbox 和水位；所有写入均位于 dataRoot/outbox 与 dataRoot/state。 */

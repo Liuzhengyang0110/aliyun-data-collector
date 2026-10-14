@@ -1,0 +1,168 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aliyun-data-collector-config
+  namespace: aliyun-collector-system
+  labels:
+    app.kubernetes.io/name: aliyun-data-collector
+data:
+  site.yaml: |
+    # 仅包含非敏感配置。replace-on-site 值必须按现场实际情况替换。
+    schemaVersion: "0.1.1"
+    projectCode: "kjky20250400"
+    envCode: "replace-on-site"
+    batchId: "continuous"
+    caseId: "production"
+    timezone: "Asia/Shanghai"
+
+    collector:
+      collectorId: "replace-on-site"
+      siteId: "replace-on-site"
+      collectorType: "ALIYUN"
+
+    runtime:
+      deploymentMode: "PRODUCTION"
+      windowSeconds: 600
+      requestTimeoutSeconds: 30
+      maxRetries: 3
+      retryBaseMillis: 500
+      retryMaxDelayMillis: 30000
+      retryJitterRatio: 0.2
+      maxPollAttempts: 10
+      pollIntervalMillis: 1000
+
+    pagination:
+      maxPages: 1000
+      maxRecords: 1000000
+
+    scheduler:
+      jitterSeconds: 3
+      shutdownGraceSeconds: 60
+      compensationIntervalSeconds: 600
+      compensationLookbackSeconds: 1800
+      arms:
+        pollIntervalSeconds: 30
+        visibilityDelaySeconds: 90
+        initialLookbackSeconds: 300
+      sls:
+        pollIntervalSeconds: 20
+        visibilityDelaySeconds: 30
+        initialLookbackSeconds: 120
+
+    upload:
+      enabled: true
+      ingestUrl: "https://cc-ingest.cc-system.svc.cluster.local:8443/collector/v1/events:batch"
+      maxRecords: 1000
+      maxCompressedBytes: 2097152
+      maxRequestBytes: 10485760
+      maxWaitMillis: 5000
+      maxInFlightBatches: 2
+      connectTimeoutSeconds: 10
+      requestTimeoutSeconds: 30
+      retryInitialDelayMillis: 1000
+      retryMaxDelayMillis: 60000
+      retryJitterRatio: 0.2
+      retryWarningAttempts: 10
+
+    security:
+      mtlsEnabled: true
+      clientAuthMode: "KEYSTORE"
+      clientCertificatePath: null
+      privateKeyPath: null
+      keyStorePath: "/etc/aliyun-data-collector/tls/client.p12"
+      keyStoreType: "PKCS12"
+      keyStorePasswordEnv: "COLLECTOR_KEYSTORE_PASSWORD"
+      trustStorePath: "/etc/aliyun-data-collector/tls/truststore.p12"
+      trustStoreType: "PKCS12"
+      trustStorePasswordEnv: "COLLECTOR_TRUSTSTORE_PASSWORD"
+      certificateExpiryWarningDays: 30
+      certificateReloadIntervalSeconds: 30
+
+    storage:
+      dataRoot: "/var/lib/aliyun-data-collector"
+      outboxDir: "outbox"
+      stateDir: "state"
+      rawPersistence:
+        enabled: false
+        directory: "raw"
+      diskWarningWatermarkPercent: 80
+      diskCriticalWatermarkPercent: 90
+      diskResumeWatermarkPercent: 75
+      diskCheckIntervalSeconds: 10
+      outboxQuota:
+        # 本地默认值以及中控永远不能突破的安全边界。
+        defaultBytes: 10737418240
+        minBytes: 1073741824
+        maxBytes: 21474836480
+        reservedFreeBytes: 1073741824
+        warningPercent: 80
+        criticalPercent: 90
+        resumePercent: 75
+        checkIntervalSeconds: 10
+
+    control:
+      enabled: true
+      taskClaimUrl: "https://cc-control-service.cc-system.svc.cluster.local:8443/collector/v1/jobs:claim"
+      jobStatusUrl: "https://cc-control-service.cc-system.svc.cluster.local:8443/collector/v1/jobs/{job_id}/status"
+      statusReportUrl: "https://cc-control-service.cc-system.svc.cluster.local:8443/collector/v1/status"
+      heartbeatIntervalSeconds: 30
+      statusChangeMinIntervalMillis: 1000
+      taskPollIntervalSeconds: 7
+      taskPollJitterSeconds: 2
+      connectTimeoutSeconds: 10
+      requestTimeoutSeconds: 30
+      retryInitialDelayMillis: 1000
+      retryMaxDelayMillis: 30000
+      retryJitterRatio: 0.2
+
+    arms:
+      enabled: true
+      mode: "RPC"
+      endpoint: "arms.internal.invalid"
+      protocol: "HTTPS"
+      regionId: "replace-on-site"
+      product: "ARMS"
+      version: "replace-on-site"
+      accessKeyIdEnv: "ARMS_ACCESS_KEY_ID"
+      accessKeySecretEnv: "ARMS_ACCESS_KEY_SECRET"
+      pageSize: 100
+      collectTraceDetails: true
+      traceQueries:
+        - name: "all-traces"
+          recordType: "topology_edge"
+          pid: "replace-on-site"
+          parameters: {}
+          pagination:
+            totalPointer: null
+            positionPointer: null
+            hasMorePointer: null
+            truncatedPointer: null
+            nextCursorPointer: null
+          normalization:
+            payloadFields: []
+            identityFields: ["TraceID"]
+      metricQueries: []
+      dataset:
+        url: null
+        usernameEnv: "ARMS_DATASET_USERNAME"
+        passwordEnv: "ARMS_DATASET_PASSWORD"
+        queries: []
+
+    sls:
+      enabled: true
+      endpoint: "sls.internal.invalid"
+      accessKeyIdEnv: "SLS_ACCESS_KEY_ID"
+      accessKeySecretEnv: "SLS_ACCESS_KEY_SECRET"
+      stsTokenEnv: "SLS_STS_TOKEN"
+      projects:
+        - project: "replace-on-site"
+          logstores:
+            - logstore: "replace-on-site"
+              recordType: "flow_record"
+              topic: ""
+              query: ""
+              pageSize: 100
+              reverse: false
+              normalization:
+                payloadFields: ["message", "method", "path", "status", "duration", "trace_id", "service_id"]
+                identityFields: ["request_id"]

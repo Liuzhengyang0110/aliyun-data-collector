@@ -9,8 +9,9 @@
 - ARMS RPC 模式：应用发现、链路搜索、链路详情和指标查询。
 - ARMS Dataset 模式：通过 Dataset 查询接口采集数据。
 - SLS 模式：发现 Logstore，并按时间窗口、offset 分页查询日志。
+- ARMS/SLS 分页具备最大页数/记录数、重复页、位置推进和总数一致性保护；无法判断完整性时失败关闭，不推进采集水位。
 - 按固定时间长度分窗，避免一次请求时间跨度过大。
-- API 暂时性失败自动重试，SLS 未完成查询自动轮询。
+- ARMS RPC、ARMS Dataset、SLS 使用彼此独立的查询错误分类和有上限抖动退避；SLS 未完成查询自动轮询。
 - 每完成一页即落盘，不需要等全部采集结束才保存。
 - 使用 checkpoint 记录进度，支持中断后继续采集。
 - 提供 `daemon` 常驻模式，按独立周期轮询 ARMS 和 SLS。
@@ -19,10 +20,11 @@
 - 调度支持随机抖动、系统时间回拨保护和停止信号下的优雅退出。
 - 配置模型已覆盖采集端身份、补偿参数、Ingest 上传、mTLS、Outbox 存储和中控任务参数，并提供完整边界校验。
 - 已冻结 `cc-ingest` v1 批量协议，并提供 gzip HTTP 客户端、可靠回执校验和本地模拟接口测试。
+- 已冻结 `cc-control` v1 控制、任务结果和节点状态协议；已实现主动任务领取、幂等状态回传、人工暂停/恢复、远程 Outbox 配额调整，以及独立节点状态心跳与变化补发。
 - 已实现独立 `BatchUploader`：Outbox 原子认领、配置化并发、带抖动退避、Retry-After、BLOCKED/认证暂停、413 确定性拆分，以及上传水位更新后删除。
 - `daemon` 已将采集循环和上传循环独立串联：任一侧暂时失败不会停止另一侧，空队列按通知等待，到期 retry 按 `next_retry_at` 自动恢复。
 - 已实现 PVC 文件式 Outbox：批次目录原子发布、pending/retry/BLOCKED 状态、启动恢复和单进程并发认领。
-- 已实现生产 Outbox/PVC 容量保护：NORMAL/WARNING/CRITICAL/RECOVERING 滞回状态机、临界暂停、恢复采集和上传持续运行。
+- 已实现生产 PVC 物理容量与 Outbox 逻辑配额双重保护：独立的 NORMAL/WARNING/CRITICAL/RECOVERING 滞回状态机、硬配额原子预留、临界暂停、恢复采集和上传持续运行。
 - 已实现独立 `UploadWatermarkStore`：按 `poll_id` 保存连续提交边界、稀疏 ACK、末批和完成状态，并在完成后压缩逐批证据。
 - 已实现 ARMS Trace/Span/Metric/Dataset 与 SLS 日志到 `StandardEvent` 的纯转换组件，包括稳定 `event_id`、多格式时间、字段准入和无原值告警。
 - 已实现采集端 mTLS：从只读 Secret Volume 加载 PEM 或 KeyStore 身份和 TrustStore，强制服务端证书链与主机名校验，支持到期告警和安全轮换。
@@ -34,7 +36,7 @@
 
 程序只提供查询入口，不提供资源修改入口。
 
-- ARMS 只允许：`ListTraceApps`、`SearchTracesByPage`、`GetTrace`、`QueryMetric`、`QueryMetricByPage`、`QueryDataset`。
+- ARMS 只允许：`ListTraceApps`、`SearchTracesByPage`、`GetTrace`、`QueryMetric`、`QueryDataset`。`QueryMetricByPage` 因现场分页协议未确认，在配置校验和运行入口均被拒绝。
 - SLS 只调用：`ListLogStores`、`GetLogs`。
 - 代码中没有创建、更新、删除、写日志、创建索引、分裂或合并 Shard 的调用。
 - AccessKey、密码和 STS Token 只从运行进程的环境变量读取。
@@ -49,8 +51,10 @@ aliyun-data-collector/
 ├─ config/
 │  ├─ site.example.yaml          ARMS RPC + SLS 配置模板
 │  └─ arms-dataset.example.yaml  ARMS Dataset 配置模板
+├─ deploy/                       Kubernetes 生产部署模板与说明
 ├─ src/                          Java 源代码和测试
 ├─ target/                       Maven 构建产物
+├─ Dockerfile                    Java 17 内部基础镜像运行制品
 ├─ pom.xml                       Maven 项目配置
 └─ README.md                     本说明
 ```
@@ -85,6 +89,10 @@ mvn clean package
 
 构建过程会运行单元测试；成功后在 `target` 目录生成 JAR。
 
+协议测试使用 `src/test/resources/contracts/` 中随代码提交的 OpenAPI 契约快照，不依赖被忽略的独立 `docs/` 文档仓库。更新协议时，应从文档仓库同步对应快照并运行协议测试。
+
+Kubernetes 生产部署必须使用现场内部 JRE 17 基础镜像的固定 digest；Dockerfile 不提供公网基础镜像默认值，也不会在运行阶段下载依赖。完整的镜像构建、Secret/PVC、网络策略、安全上下文和现场验收说明见 [deploy/README.md](deploy/README.md)。当前尚无可靠的 Kubernetes liveness/readiness 接口，部署模板明确保留 TODO，不以 Java 进程存在或镜像内未确认的命令冒充健康检查。
+
 查看程序帮助：
 
 ```powershell
@@ -102,7 +110,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar --help
 - RegionId。
 - API Version；专有云版本不能直接假设与公有云一致。
 - 应用 PID。
-- 使用 `QueryMetric` 还是 `QueryMetricByPage`。
+- 确认 `QueryMetric` 的返回上限；如果现场仅提供 `QueryMetricByPage`，需先提供分页协议并实现适配，当前版本不能启用。
 - 需要采集的 Metric、Measures、Dimensions、Filters。
 - `IntervalInSec` 在现场版本中的实际单位和最小值。
 
@@ -113,6 +121,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar --help
 - 用户名或 `_userId`。
 - 是否需要 HTTP Basic 密码。
 - Measures、额外查询参数和时间间隔。
+- 完整结束标志、总数、截断标志、游标字段和请求参数、最大返回条数；没有完整性证据时不会按单页成功处理。
 
 ### 5.3 SLS
 
@@ -166,6 +175,9 @@ runtime:
   deploymentMode: "DEVELOPMENT"
   windowSeconds: 600
   maxRetries: 3
+  retryBaseMillis: 500
+  retryMaxDelayMillis: 30000
+  retryJitterRatio: 0.2
   maxPollAttempts: 10
 
 scheduler:
@@ -222,13 +234,30 @@ storage:
   diskCriticalWatermarkPercent: 90
   diskResumeWatermarkPercent: 75
   diskCheckIntervalSeconds: 10
+  outboxQuota:
+    defaultBytes: 10737418240
+    minBytes: 1073741824
+    maxBytes: 21474836480
+    reservedFreeBytes: 1073741824
+    warningPercent: 80
+    criticalPercent: 90
+    resumePercent: 75
+    checkIntervalSeconds: 10
 
 control:
   enabled: false
   taskClaimUrl: null
+  jobStatusUrl: null
+  statusReportUrl: null # 启用 control 时填写固定 /collector/v1/status 地址
   heartbeatIntervalSeconds: 30
-  taskPollIntervalSeconds: 10
+  statusChangeMinIntervalMillis: 1000
+  taskPollIntervalSeconds: 7
+  taskPollJitterSeconds: 2
+  connectTimeoutSeconds: 10
   requestTimeoutSeconds: 30
+  retryInitialDelayMillis: 1000
+  retryMaxDelayMillis: 30000
+  retryJitterRatio: 0.2
 
 arms:
   enabled: true
@@ -280,9 +309,17 @@ sls:
 
 模板中包含更多可选字段，应以模板和甲方 API 文档为准。
 
-`upload.enabled`、`security.mtlsEnabled` 和 `control.enabled` 默认关闭。启用 `upload.enabled` 后，`daemon` 会同时启动相互独立的采集循环和上传循环，持续消费 Outbox 的 pending 与到期 retry。mTLS 已接入上传客户端；PEM 模式使用 `clientCertificatePath` 和 `privateKeyPath`，KEYSTORE 模式使用 `keyStorePath`，两种模式不能混用，密码只通过环境变量名引用。任务领取仍将在对应后续任务中实现。
+`upload.enabled`、`security.mtlsEnabled` 和 `control.enabled` 默认关闭。启用 `upload.enabled` 后，`daemon` 会同时启动相互独立的采集循环和上传循环，持续消费 Outbox 的 pending 与到期 retry。启用 `control.enabled` 时必须关闭 raw 并使用生产 Outbox 路径，同时填写固定路径的 `taskClaimUrl`、带唯一 `{job_id}` 占位符的 `jobStatusUrl` 和固定路径的 `statusReportUrl`。默认任务轮询基线为 7 秒、正负 2 秒抖动，即约 5～9 秒；节点心跳默认 30 秒一次，状态连续变化按 `statusChangeMinIntervalMillis` 合并限频；通信失败按 1～30 秒有界抖动退避。mTLS 已同时接入上传、任务控制与节点状态客户端；PEM 模式使用 `clientCertificatePath` 和 `privateKeyPath`，KEYSTORE 模式使用 `keyStorePath`，两种模式不能混用，密码只通过环境变量名引用。
 
 接口字段、哈希算法、状态码和中控端实现要求见 [cc-ingest v1 批量上传接口契约](docs/cc-ingest-v1接口契约.md)，机器可读定义见 [OpenAPI 3.1 文件](docs/openapi/cc-ingest-v1.openapi.yaml)。`upload.ingestUrl` 必须使用固定路径 `/collector/v1/events:batch`。
+
+控制任务、任务结果、节点心跳、远程 Outbox 逻辑配额及 mTLS 身份绑定规则见 [cc-control v1 接口契约](docs/cc-control-v1接口契约.md)，机器可读定义见 [cc-control OpenAPI 3.1 文件](docs/openapi/cc-control-v1.openapi.yaml)。P1-01 已接入 `/collector/v1/jobs:claim` 与 `/collector/v1/jobs/{job_id}/status`，P1-02 已接入 `/collector/v1/status`；采集端只主动出站连接，不开放入站控制或状态 HTTP 接口。首批只执行 `PAUSE_COLLECTION`、`RESUME_COLLECTION` 和 `SET_OUTBOX_QUOTA`，拒绝 Shell、任意路径/URL、AccessKey、私钥及未批准参数。
+
+控制任务每次先把 RECEIVED/RUNNING/终态写入 `state/control-jobs.json`，再尽力回传。相同 `job_id` 和相同内容只重发已保存状态；内容冲突、过期、身份不匹配、未知命令、非法参数和旧 `config_version` 均被拒绝。人工暂停保存在 `state/manual-pause-state.json`，最后有效远程配额保存在 `state/runtime-policy.json`。这些文件均使用同目录临时文件、`fsync` 和同文件系统原子替换，损坏时失败关闭。控制服务断开不会结束 daemon，也不会清除最后有效策略；上传循环在人工暂停或容量 CRITICAL 时继续排空 Outbox。
+
+节点状态由独立 `StatusReporter` 线程生成并主动发送，不依赖采集、上传或控制任务成功。快照包含采集端身份和启动时间、最新配置版本/控制任务摘要、ARMS/SLS 成功失败与任务级采集水位、上传水位与在途数、pending/retry/BLOCKED 数量/字节/最老年龄，以及 PVC 物理容量和 Outbox 逻辑配额。总体状态为 `RUNNING`、`PAUSED` 或 `DEGRADED`；人工暂停、物理容量暂停、逻辑配额暂停和上传鉴权暂停按冻结协议中的不同 `status_reasons` 组合表达。
+
+人工暂停/恢复、容量四态变化、上传鉴权暂停/恢复、BLOCKED 出现、远程配额生效或拒绝会触发变化补发；200 ms 轻量变更检测与默认 1000 ms 最小变化间隔用于合并状态风暴。上报失败只在状态线程内有界退避，恢复后重新生成并发送最新快照，不将心跳写入业务 Outbox，也不补发历史快照。载荷只包含有限状态分类和统计，不读取或发送 AccessKey、密码、私钥、Secret 路径、完整 Endpoint、原始响应或 `StandardEvent.payload`。中控应按最后接收时间推导 `OFFLINE`，采集端不会伪造离线状态。
 
 ### 6.2 开发与生产模式
 
@@ -567,7 +604,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
   --end 2026-07-27T10:00:00+08:00
 ```
 
-开发 raw 模式下，程序读取 `checkpoints/checkpoint.json`，跳过已经成功的页面、Trace 详情和任务窗口。
+开发 raw 模式下，程序读取 `checkpoints/checkpoint.json`，跳过已完整完成的任务窗口和已保存的 Trace 详情。尚未完成的 Trace/SLS 窗口从第一页重新查询和保存，以重建总数、重复页与终止条件的核对依据；不能仅凭旧页面 checkpoint 跳过核对。可能产生重复 raw 分片，但不覆盖已有文件。
 
 生产模式关闭 raw 时不使用页面级 checkpoint；`resume` 会按给定时间范围重新查询，并依靠稳定 `event_id`、`poll_id`、`batch_id` 与 Outbox 幂等写入恢复。只有每个任务窗口的全部批次已进入 pending，才会推进其任务级采集水位。
 
@@ -593,7 +630,7 @@ java -jar target/aliyun-data-collector-0.1.0-SNAPSHOT.jar `
 - 系统时间回拨导致查询终点未超过水位时，本轮等待，不倒退水位。
 - 每轮带有 `jitterSeconds` 随机抖动，降低多个任务或实例同时请求云平台的概率。
 
-停止进程时，调度器先停止创建新轮询，再等待正在执行的采集结束，最长等待 `shutdownGraceSeconds`。生产 daemon 会独立运行采集、容量监控和可选上传循环；采集或容量暂停不会停止上传，上传故障也不会终止采集进程。当前阶段尚未实现最近 30 分钟补偿查询和长周期对账。
+停止进程时，调度器先停止创建新轮询，再等待正在执行的采集结束，最长等待 `shutdownGraceSeconds`。生产 daemon 会独立运行采集、容量监控、可选上传、控制和节点状态循环；采集或容量暂停不会停止上传，控制/状态/上传故障也不会终止采集进程。当前阶段尚未实现最近 30 分钟补偿查询和长周期对账。
 
 ### 10.8 `validate-output`：校验输出
 
@@ -740,7 +777,11 @@ data/
 └─ state/
    ├─ collection-watermarks.json  ARMS/SLS 采集水位
    ├─ upload-watermarks.json      中控已确认的提交水位
-   └─ capacity-state.json         最近一次持久化的容量保护状态
+   ├─ capacity-state.json         PVC 物理容量保护状态（保留原 1.0 Schema）
+   ├─ outbox-quota-state.json     Outbox 逻辑配额滞回状态
+   ├─ runtime-policy.json         最后一次成功生效的远程配额策略
+   ├─ manual-pause-state.json     全局及 ARMS/SLS 人工暂停策略
+   └─ control-jobs.json           已领取任务摘要、最新状态和配置版本
 ```
 
 每个批次使用 `batch-<SHA-256(batch_id)>` 作为安全目录名，目录中包含三类文件：
@@ -770,7 +811,7 @@ P0-09 已提供独立 `UploadWatermarkStore`，默认文件为 `state/upload-wat
 
 可重试失败在 `delivery.json` 保存 `attempt_count`、`last_error` 和 `next_retry_at`。429 使用整数秒 `Retry-After`；408、500/502/503、HTTP 超时、断连和响应丢失使用原 `batch_id` 按带抖动指数退避重试。达到 `retryWarningAttempts` 只产生有限字段告警，不删除或停止可重试批次。400/422 和 409 分别以 VALIDATION/CONFLICT 标记 `BLOCKED`；401/403 暂停上传器并产生 HIGH 状态，但不改写批次。
 
-`daemon` 启动时复用采集管道的同一个 `OutboxStore`，确保进程内认领互斥。上传循环每轮最多认领 `upload.maxInFlightBatches` 个批次；单批 `BLOCKED` 会被后续扫描跳过，不妨碍其他 pending/retry。启动时 Outbox 自动恢复 writing/pending/retry，随后上传循环立即处理可发送批次。关闭时先停止并等待采集，再停止上传循环；宽限期内允许当前查询和在途上传完成。
+`daemon` 启动时复用采集管道的同一个 `OutboxStore`，确保进程内认领互斥。上传循环每轮最多认领 `upload.maxInFlightBatches` 个批次；单批 `BLOCKED` 会被后续扫描跳过，不妨碍其他 pending/retry。启动时先恢复容量、配额、人工暂停和任务状态，再独立启动上传、控制、采集和状态循环。关闭时先停止状态上报和控制领取，再停止新采集、上传及容量监控；控制或状态服务不可达不会传播为其他循环的退出条件。
 
 生产模式每隔 `diskCheckIntervalSeconds` 检查 Outbox 所在 PVC 文件系统的总字节和可用字节，并使用以下状态机：
 
@@ -781,7 +822,13 @@ P0-09 已提供独立 `UploadWatermarkStore`，默认文件为 `state/upload-wat
 
 必须满足 `diskResumeWatermarkPercent < diskWarningWatermarkPercent < diskCriticalWatermarkPercent`。状态首次检查和状态切换会原子保存到 `state/capacity-state.json`，Pod 重启后先恢复原状态再同步检查当前容量。容量保护从不删除 pending、retry 或 BLOCKED 批次；只有上传器获得可靠提交回执并更新上传水位后才允许删除。开启 raw 的开发模式不启动生产 PVC 容量监控，开发 raw 数据不参与该状态机。
 
-当前版本已实现 P0-03 标准事件转换、P0-04 任务级采集水位、P0-06 文件式 Outbox、P0-07 流式确定性组批、P0-08 独立上传器、P0-09 上传水位联动、P0-10 的生产采集与 daemon 上传线程串联、P0-11 采集端 mTLS，以及 Outbox/PVC 字节容量门控。尚未完成的是中控端证书身份与 `collector_id` 绑定、积压指标、inode/文件数保护和长时间故障恢复验收。
+Outbox 逻辑配额由 `storage.outboxQuota` 独立配置。首次应用远程策略前使用 `defaultBytes`；实际可用上限同时受本地 `maxBytes` 和 `PVC 总容量 - reservedFreeBytes` 约束，并且不得低于 `minBytes`。远程请求低于最小值、高于最大值或超过 PVC 安全上限时由 `applyRequestedQuota` 明确拒绝并保留旧策略；成功策略原子写入 `state/runtime-policy.json`，重启后恢复。策略文件或临时文件损坏会失败关闭，不会回退到更宽松的 YAML 默认值。
+
+逻辑使用量只统计 `outbox/writing`、`pending`、`retry` 下的批次内容、描述文件和 `delivery.json`，因此 BLOCKED 批次也计入；raw、manifest、普通日志、采集/上传水位和容量状态不计入。启动时执行全量扫描，Outbox 创建、投递元数据替换和可靠提交后的删除使用精确差量维护，并按 `checkIntervalSeconds` 周期全量校正。新批次进入 writing 前会原子预留空间；预留失败会终止当前窗口且不推进采集水位，已有 pending/retry/BLOCKED 保持不变。上传需要的 retry/BLOCKED 元数据、413 子批处理和可靠提交后的空间释放不受采集 CRITICAL 门禁阻断。
+
+逻辑配额使用 `resumePercent < warningPercent < criticalPercent` 的独立滞回状态机。配额降低到当前使用量以下会立即进入 CRITICAL；只有上传释放空间至 resume 水位后才恢复。生产采集在调度入口及每个实际查询窗口开始前同时检查物理与逻辑状态，任一 CRITICAL 都会暂停新查询，而提高逻辑配额不能绕过物理 PVC CRITICAL。逻辑配额只限制采集端 Outbox，不会创建、扩容或缩容 Kubernetes PVC，也没有自动删除未提交数据的路径。
+
+当前版本已实现 P0-03 标准事件转换、P0-04 任务级采集水位、P0-06 文件式 Outbox、P0-07 流式确定性组批、P0-08 独立上传器、P0-09 上传水位联动、P0-10 的生产采集与 daemon 上传线程串联、P0-11 采集端 mTLS、P1-01 首批控制闭环、P1-02 节点状态主动上报，以及 P1-03 的本地 Outbox 逻辑配额和 PVC 双重容量门控。P1-00 已冻结控制、状态和远程容量策略协议；尚未实现 P1-01 第二阶段补采/指定批次重传/非敏感配置重载、P1-04 Kubernetes liveness/readiness 部署接入，也尚未完成中控端证书身份绑定、inode/文件数保护及长时间故障恢复验收。
 
 ## 13. 文件命名
 
@@ -826,15 +873,27 @@ SLS SDK 会先解码响应，程序再包装为 JSON 信封，其中包含：
 
 ## 15. 重试、停止和恢复规则
 
-自动重试主要针对：
+ARMS RPC、ARMS Dataset 和 SLS 查询统一输出以下四类结果，但各自使用独立 `RetryExecutor`；查询侧不会复用 `UploadRetryPolicy`，也不会与 Ingest、Control 或 Status 共享退避状态：
 
-- 网络连接异常。
-- 请求超时。
-- HTTP 408、429。
-- HTTP 5xx。
-- SDK 返回的限流、服务器或暂时性网络错误。
+| 分类 | 典型错误 | 当前调用内处理 |
+| --- | --- | --- |
+| `RETRYABLE` | 网络连接/重置、请求超时、HTTP 408、500/502/503/504、SDK 明确的临时服务端错误 | 按有上限的抖动指数退避重试 |
+| `RATE_LIMITED` | HTTP 429、SDK Throttling/RateLimit/FlowControl | 优先使用服务端 `Retry-After`，否则使用本地退避 |
+| `AUTHENTICATION` | HTTP 401/403、无效 AccessKey/签名/Token、明确权限不足 | 不在当前窗口高频重试，立即失败并等待凭据或授权修复 |
+| `NON_RETRYABLE` | HTTP 400/404、非法参数、配置错误、资源不存在、Schema/响应结构错误 | 立即失败 |
 
-权限错误、参数错误和资源不存在通常立即失败，不反复重试。一次性 `collect/resume` 失败时程序会：
+第 `n` 次失败后的本地基础等待为：
+
+```text
+B(n) = min(retryMaxDelayMillis, retryBaseMillis * 2^(n-1))
+D(n) = min(retryMaxDelayMillis, round(B(n) * (1 - j + 2*j*U)))
+```
+
+其中 `j=retryJitterRatio`，`U` 为 `[0,1]` 的独立随机数。服务端给出整数秒或 RFC 1123 日期格式的 `Retry-After` 时，等待时间优先使用该建议并限制在 `retryMaxDelayMillis` 内。随机抖动会使同时恢复的任务分散请求；退避上限避免长时间故障时无限增长。`retryBaseMillis` 必须大于 0，`retryMaxDelayMillis` 必须不小于基础等待且最多为 3600000 ms。
+
+日志只记录外部系统、任务、尝试次数、分类、安全错误码和下次等待时间；不记录 AccessKey、Token、密码、完整响应正文或原始事件。达到 `maxRetries + 1` 次总尝试后，当前窗口失败且不推进采集水位；daemon 仍保持运行，下一调度周期可从原水位重新尝试。
+
+一次性 `collect/resume` 失败时程序会：
 
 1. 把错误写入 manifest 的 `errors`。
 2. 把错误写入 `logs/collector.log`。
@@ -844,6 +903,45 @@ SLS SDK 会先解码响应，程序再包装为 JSON 信封，其中包含：
 修复问题后使用 `resume`，不需要从头开始。
 
 `daemon` 模式中，单轮失败不会结束进程。该轮水位保持不变，调度器在下一周期继续尝试；正常停止时则先停止创建新轮询，并等待正在进行的落盘操作安全结束。
+
+### 15.1 分页完整性与失败关闭（P1-06）
+
+所有限制作用于单个任务的一个固定查询窗口，而非上传批次：
+
+```yaml
+pagination:
+  maxPages: 1000
+  maxRecords: 1000000
+```
+
+`maxPages` 允许 1～100000，`maxRecords` 允许 1～100000000。若达到上限时仍需继续查询，任务失败；只有最后一页已提供完整结束证据时，才能恰好在上限处成功。不要仅靠调大限制处理异常，应先核对协议或缩短查询窗口。
+
+- **Trace**：优先使用返回总数、页码、`hasMore` 等证据；没有这些元数据时，兼容“返回条数小于请求 `pageSize`”结束。刚好满页且无明确终止证据时继续请求，最终空页可以合法结束。总数变化、累计数量超过总数、终止标志互相矛盾、返回页码不匹配或服务端返回的页大小与请求不符时失败。当前只发送已使用的 `PageNumber`/`PageSize`；出现非空游标而无法使用页码策略解释时失败，不猜测新的请求字段。
+- **QueryMetric**：仍为单次查询，但到达 `limit` 且无明确结束证据、或响应显示还有数据时失败，建议缩小时间窗。`QueryMetricByPage` 当前一律禁止，不能通过改 action 绕过此保护。
+- **Dataset**：默认 `SINGLE_RESPONSE`，必须由总数等于实际条数、明确 `hasMore=false`、`truncated=false` 等响应证据证明结束。无证据的数组（包括单纯空数组）不能证明完整，会报 `PAGINATION_COMPLETENESS_UNKNOWN`。明确完整的空窗口仍正常推进至 `window_end`。
+- **SLS**：窗口开始时复制 Project/Logstore、时间、Topic、Query、pageSize、reverse 等参数，整个分页过程保持不变。offset 按返回数量递增；重复页、空页但仍有更多数据、总数异常和分页上限均失败关闭。SDK 的 `completed` 仅表示当前查询执行完成，不代表整窗数据已读完。
+
+页内容摘要与 Request ID 分离；即使 Request ID 不同、对象字段顺序或整页记录顺序变化，相同记录组成的重复页也会被拒绝。这样可能保守拒绝完全相同的合法日志页，需通过现场稳定记录标识、查询粒度或后续协议适配解决，不能直接关闭保护来推进水位。
+
+#### 现场响应字段适配
+
+ARMS 每个 Trace/Metric/Dataset 任务均可配置 `pagination.totalPointer`、`positionPointer`、`hasMorePointer`、`truncatedPointer`、`nextCursorPointer`。这些是 **JSON Pointer**，必须按现场实际文档填写；显式配置的字段缺失或类型错误时失败，不静默回退。总数和位置须为非负 JSON 整数，状态为 JSON 布尔值。`positionPointer` 当前对应从 1 开始的页码；不同语义需要额外适配。
+
+未配置路径时，仅保守检查根对象及 `PageBean`、`Data`、`data`、`pagination` 信封中的常见标记：`TotalCount/totalCount/Total/total`、`PageNumber/pageNumber/Page/page`、`HasMore/hasMore/has_more`、`Truncated/truncated/IsTruncated/isTruncated`、`NextToken/nextToken/NextCursor/nextCursor`。这些只是矛盾/截断防护，不代表已经核实现场字段；不会扫描业务记录并将其字段当作分页协议。自定义路径和已识别信封标记互相矛盾时也失败。
+
+Dataset 提供可配置的 `CURSOR` 策略。只有拿到现场文档后，才能设置 `strategy: CURSOR`，并明确 `nextCursorPointer`（响应游标 JSON Pointer）与 `cursorParameter`（下一页表单参数名）。首请求不携带游标，后续仅回传该字段；响应游标必须每页存在，非空字符串表示继续，空字符串或 null 表示结束。重复游标、缺少游标、空页但有后续游标、游标与总数/截断标志矛盾均失败。未配置策略时即使看到非空游标，也不会猜测参数名继续请求。上述策略只经过模拟协议测试，尚未经过现场 API 验证。
+
+`parameters` 禁止覆盖 Trace 的 `StartTime/EndTime/PageNumber/PageSize`、Metric 的 `StartTime/EndTime/Limit`、Dataset 的 `minTime/maxTime`；Dataset 游标参数也不能预设或覆盖业务/身份参数。其他已支持的非保护参数仍保持原有透传规则。
+
+SLS 内部 `QueryResult` 可由经过验证的适配器补充 `total/offset/hasMore`，但当前 `SlsSdkApi` 没有已核实的整窗总数和 offset 回显，保留为未知，使用短页结束规则；不得把本页日志数量冒充整窗总数。
+
+#### 水位、日志和已知限制
+
+任一页失败、触发保护或无法判定完整时，都不会调用该任务的 `finish()`，也不会推进任务采集水位；之前已进入 pending 的批次保留。后续重查依靠既有稳定事件/批次身份处理重复，不改变标准事件、cc-ingest 或中控控制协议。
+
+每个实际执行的任务窗口输出一条 `QUERY_SUMMARY` JSON，包含 `source_key`、`window_start/window_end`、`page_count`、`record_count`、`request_id_sha256_sample` 和 `complete`。页数/条数统计已解析的查询结果（包括触发核对失败的页），Trace 的条数统计搜索记录而不重复累计详情 Span；Request ID 只保存最多 16 个 SHA-256 样本，详情请求也参与摘要。失败时 `complete=false`；只有分页核对、标准化、Outbox/水位完成后才为 true（开发 raw 模式为输出及 checkpoint 完成）。摘要不含响应正文、查询表达式、游标或凭据。采集调用的 SDK 异常与 JSON 解析异常不会附带原始消息/异常 cause 对外传播。
+
+固定 SLS 时间窗口不是服务端快照，窗口内迟到日志、删除、排序变化仍可能影响 offset。现有模拟测试验证参数冻结、变化总数/重复页被拒绝、持续满页有界停止，不能证明现场无漏数。须结合可见性延迟、现场短窗口对账验证排序/上限/可见性；补偿与长周期对账仍属于待实现的 P0-05。未知字段或服务端未公开的硬截断限制必须先确认并适配，不能宣称已完成现场验收。
 
 ## 16. 退出码
 
@@ -886,7 +984,7 @@ $LASTEXITCODE
 
 检查：
 
-- `action` 是 `QueryMetric` 还是 `QueryMetricByPage`。
+- `action` 是否为当前支持的 `QueryMetric`；`QueryMetricByPage` 会被配置校验明确拒绝。
 - Metric、Measures、Dimensions 是否受现场版本支持。
 - Filters 是否同时包含 PID 和 RegionId。
 - `IntervalInSec` 的单位是秒还是毫秒。

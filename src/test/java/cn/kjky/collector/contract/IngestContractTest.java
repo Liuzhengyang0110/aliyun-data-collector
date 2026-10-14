@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Path;
+import java.io.InputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -24,7 +24,11 @@ class IngestContractTest {
     @Test
     void openApiContainsFrozenBatchPathAndFields() throws Exception {
         ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
-        JsonNode root = yaml.readTree(Path.of("docs/openapi/cc-ingest-v1.openapi.yaml").toFile());
+        JsonNode root;
+        try (InputStream input = getClass().getResourceAsStream("/contracts/cc-ingest-v1.openapi.yaml")) {
+            assertThat(input).as("ingest OpenAPI test resource").isNotNull();
+            root = yaml.readTree(input);
+        }
 
         assertThat(root.path("openapi").asText()).isEqualTo("3.1.0");
         assertThat(root.path("paths").path("/collector/v1/events:batch").path("post").isObject()).isTrue();

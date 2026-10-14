@@ -59,7 +59,13 @@ public interface SlsApi extends AutoCloseable {
      * @param elapsedMillis 服务端查询耗时毫秒数
      */
     record QueryResult(boolean completed, List<LogRecord> logs, String rawQueryResult, String requestId,
-                       long scanBytes, long elapsedMillis) {}
+                       long scanBytes, long elapsedMillis, Long total, Long offset, Boolean hasMore) {
+        /** Current SDK exposes no verified total/offset echo: leave metadata unknown, not page count. */
+        public QueryResult(boolean completed, List<LogRecord> logs, String rawQueryResult, String requestId,
+                           long scanBytes, long elapsedMillis) {
+            this(completed, logs, rawQueryResult, requestId, scanBytes, elapsedMillis, null, null, null);
+        }
+    }
 
     /**
      * 一条 SLS 日志。

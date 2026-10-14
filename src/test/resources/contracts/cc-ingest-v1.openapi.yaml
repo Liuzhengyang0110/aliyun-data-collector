@@ -1,0 +1,244 @@
+openapi: 3.1.0
+info:
+  title: cc-ingest Collector Batch API
+  version: "1.0"
+  description: 阿里云采集端向中控 cc-ingest 主动提交标准事件批次的 v1 契约。
+servers:
+  - url: https://cc-ingest.cc-system.svc.cluster.local
+paths:
+  "/collector/v1/events:batch":
+    post:
+      operationId: commitCollectorEventBatch
+      summary: 原子提交一个采集事件批次
+      description: 请求可以使用 Content-Encoding gzip。只有 COMMITTED 或 ALREADY_COMMITTED 表示可靠提交。
+      security:
+        - mutualTLS: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchEnvelope"
+      responses:
+        "200":
+          description: 批次已可靠提交，或相同内容的批次此前已经提交。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "202":
+          description: 仅接收但尚未可靠提交；采集端不会删除本地批次。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "400":
+          $ref: "#/components/responses/ContractError"
+        "401":
+          $ref: "#/components/responses/AuthenticationError"
+        "403":
+          $ref: "#/components/responses/AuthenticationError"
+        "409":
+          description: 相同 batch_id 对应不同 content_sha256。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "413":
+          description: 请求超过中控允许的压缩或解压后大小。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "422":
+          $ref: "#/components/responses/ContractError"
+        "429":
+          description: 请求被限流，Retry-After 使用整数秒。
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "502":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/ServerError"
+components:
+  securitySchemes:
+    mutualTLS:
+      type: mutualTLS
+      description: 生产环境由客户端证书标识采集端，并与 collector_id 绑定。
+  responses:
+    ContractError:
+      description: 请求格式、Schema 或字段语义错误；采集端将批次标记为 BLOCKED。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/IngestResponse"
+    AuthenticationError:
+      description: 认证或授权失败；采集端暂停上传并保留批次。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/IngestResponse"
+    ServerError:
+      description: 中控暂时不可用；采集端保持原 batch_id 重试。
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/IngestResponse"
+  schemas:
+    BatchEnvelope:
+      type: object
+      required:
+        - schema_version
+        - batch_id
+        - poll_id
+        - batch_sequence
+        - is_last_batch
+        - collector_id
+        - site_id
+        - collector_type
+        - source_type
+        - source_key
+        - window_start
+        - window_end
+        - record_count
+        - content_sha256
+        - events
+      properties:
+        schema_version:
+          type: string
+          const: "1.0"
+        batch_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        poll_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        batch_sequence:
+          type: integer
+          minimum: 0
+        is_last_batch:
+          type: boolean
+        collector_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        site_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        collector_type:
+          type: string
+          const: ALIYUN
+        source_type:
+          type: string
+          enum: [ARMS, SLS]
+        source_key:
+          type: string
+          minLength: 1
+          maxLength: 512
+        window_start:
+          type: string
+          format: date-time
+        window_end:
+          type: string
+          format: date-time
+        record_count:
+          type: integer
+          minimum: 1
+          maximum: 1000
+        content_sha256:
+          $ref: "#/components/schemas/Sha256"
+        events:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: "#/components/schemas/StandardEvent"
+    StandardEvent:
+      type: object
+      required:
+        - event_id
+        - record_type
+        - event_time
+        - source_ref
+        - payload_sha256
+        - payload
+      properties:
+        event_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        record_type:
+          type: string
+          minLength: 1
+          maxLength: 128
+        event_time:
+          type: string
+          format: date-time
+        trace_id:
+          type: string
+        span_id:
+          type: string
+        service_id:
+          type: string
+        instance_id:
+          type: string
+        source_ref:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        payload_sha256:
+          $ref: "#/components/schemas/Sha256"
+        payload:
+          type: object
+          additionalProperties: true
+    IngestResponse:
+      type: object
+      required:
+        - schema_version
+        - batch_id
+        - content_sha256
+        - status
+      properties:
+        schema_version:
+          type: string
+          const: "1.0"
+        batch_id:
+          type: string
+        content_sha256:
+          $ref: "#/components/schemas/Sha256"
+        status:
+          type: string
+          enum:
+            - COMMITTED
+            - ALREADY_COMMITTED
+            - RECEIVED
+            - SCHEMA_ERROR
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - CONFLICT
+            - PAYLOAD_TOO_LARGE
+            - RATE_LIMITED
+            - SERVICE_UNAVAILABLE
+        committed_at:
+          type: string
+          format: date-time
+        reason_code:
+          type: string
+        message:
+          type: string
+          maxLength: 1024
+    Sha256:
+      type: string
+      pattern: "^[0-9a-f]{64}$"

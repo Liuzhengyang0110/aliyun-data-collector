@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aliyun-data-collector
+  namespace: aliyun-collector-system
+  labels:
+    app.kubernetes.io/name: aliyun-data-collector
+    app.kubernetes.io/part-of: microservice-security
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aliyun-data-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aliyun-data-collector
+        app.kubernetes.io/part-of: microservice-security
+    spec:
+      serviceAccountName: aliyun-data-collector
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: collector
+          # 语法有效但不可路由的占位镜像；部署前必须替换为内部仓库镜像及真实固定 digest。
+          image: registry.internal.invalid/security/aliyun-data-collector@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          args: ["daemon", "--config", "/etc/aliyun-data-collector/site.yaml"]
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:InitialRAMPercentage=25.0 -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError -Djava.io.tmpdir=/tmp"
+            - name: ARMS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aliyun-data-collector-credentials
+                  key: ARMS_ACCESS_KEY_ID
+            - name: ARMS_ACCESS_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: aliyun-data-collector-credentials
+                  key: ARMS_ACCESS_KEY_SECRET
+            - name: SLS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aliyun-data-collector-credentials
+                  key: SLS_ACCESS_KEY_ID
+            - name: SLS_ACCESS_KEY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: aliyun-data-collector-credentials
+                  key: SLS_ACCESS_KEY_SECRET
+            - name: SLS_STS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aliyun-data-collector-credentials
+                  key: SLS_STS_TOKEN
+                  optional: true
+            - name: COLLECTOR_KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: aliyun-data-collector-credentials
+                  key: COLLECTOR_KEYSTORE_PASSWORD
+            - name: COLLECTOR_TRUSTSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: aliyun-data-collector-credentials
+                  key: COLLECTOR_TRUSTSTORE_PASSWORD
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+              ephemeral-storage: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: config
+              mountPath: /etc/aliyun-data-collector/site.yaml
+              subPath: site.yaml
+              readOnly: true
+            - name: tls
+              mountPath: /etc/aliyun-data-collector/tls
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/aliyun-data-collector
+            - name: tmp
+              mountPath: /tmp
+          # TODO(P1-02): 当前没有可靠的 liveness/readiness 接口或命令。
+          # 在实现关键线程与 PVC/状态文件检查前，不配置“进程存在”伪探针。
+      volumes:
+        - name: config
+          configMap:
+            name: aliyun-data-collector-config
+        - name: tls
+          secret:
+            secretName: aliyun-data-collector-tls
+            defaultMode: 0400
+        - name: data
+          persistentVolumeClaim:
+            claimName: aliyun-data-collector-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

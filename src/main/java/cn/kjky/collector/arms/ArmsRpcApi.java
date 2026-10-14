@@ -2,6 +2,7 @@ package cn.kjky.collector.arms;
 
 import cn.kjky.collector.config.CollectorConfig;
 import cn.kjky.collector.config.SecretResolver;
+import cn.kjky.collector.core.CloudQueryException;
 import com.aliyuncs.CommonRequest;
 import com.aliyuncs.CommonResponse;
 import com.aliyuncs.DefaultAcsClient;
@@ -63,6 +64,11 @@ public final class ArmsRpcApi implements ArmsApi {
         // response.data 保留服务端原始 JSON，不在适配器层做业务转换。
         CommonResponse response = client.getCommonResponse(request);
         String requestId = response.getHttpResponse() == null ? null : response.getHttpResponse().getHeaderValue("x-acs-request-id");
+        if (response.getHttpStatus() < 200 || response.getHttpStatus() >= 300) {
+            String retryAfter = response.getHttpResponse() == null ? null
+                    : response.getHttpResponse().getHeaderValue("Retry-After");
+            throw CloudQueryException.forHttpStatus(response.getHttpStatus(), retryAfter);
+        }
         return new ApiResponse(response.getData(), response.getHttpStatus(), requestId);
     }
 

@@ -2,6 +2,7 @@ package cn.kjky.collector.arms;
 
 import cn.kjky.collector.config.CollectorConfig;
 import cn.kjky.collector.config.SecretResolver;
+import cn.kjky.collector.core.CloudQueryException;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -75,10 +76,10 @@ public final class ArmsDatasetApi implements ArmsApi {
         }
         // response 使用 UTF-8 字符串保留 Dataset 返回的原始 JSON。
         HttpResponse<String> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-        if (response.statusCode() == 408 || response.statusCode() == 429 || response.statusCode() >= 500) {
-            throw new java.io.IOException("Dataset HTTP 暂时失败: " + response.statusCode());
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            throw CloudQueryException.forHttpStatus(response.statusCode(),
+                    response.headers().firstValue("Retry-After").orElse(null));
         }
-        if (response.statusCode() >= 400) throw new IllegalStateException("Dataset HTTP 请求失败: " + response.statusCode());
         return new ApiResponse(response.body(), response.statusCode(), response.headers().firstValue("x-acs-request-id").orElse(null));
     }
 

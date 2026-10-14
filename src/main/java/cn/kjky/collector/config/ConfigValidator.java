@@ -41,6 +41,13 @@ public final class ConfigValidator {
         try { ZoneId.of(c.timezone); } catch (Exception e) { errors.add("timezone 无效: " + c.timezone); }
         validateCollector(c.collector, errors);
         validateRuntime(c.runtime, errors);
+        if (c.pagination == null) errors.add("pagination 不能为空");
+        else {
+            if (c.pagination.maxPages < 1 || c.pagination.maxPages > 100000)
+                errors.add("pagination.maxPages 必须在 1..100000");
+            if (c.pagination.maxRecords < 1 || c.pagination.maxRecords > 100000000)
+                errors.add("pagination.maxRecords 必须在 1..100000000");
+        }
         validateScheduler(c, errors);
         validateUpload(c.upload, c.security, errors);
         boolean communicationSecretsRequired = requireSecrets
@@ -51,8 +58,16 @@ public final class ConfigValidator {
                 && (c.security == null || !c.security.mtlsEnabled)) {
             errors.add("PRODUCTION 模式启用上传时必须启用 security.mtlsEnabled");
         }
+        if (c.runtime != null && "PRODUCTION".equalsIgnoreCase(c.runtime.deploymentMode)
+                && c.control != null && c.control.enabled
+                && (c.security == null || !c.security.mtlsEnabled)) {
+            errors.add("PRODUCTION 模式启用中控任务时必须启用 security.mtlsEnabled");
+        }
         validateStorage(c, errors);
         validateControl(c.control, c.security, errors);
+        if (c.control != null && c.control.enabled && c.rawPersistenceEnabled()) {
+            errors.add("启用 control 时必须关闭 storage.rawPersistence.enabled，以便使用 Outbox 配额闭环");
+        }
 
         boolean armsEnabled = c.arms != null && c.arms.enabled;
         boolean slsEnabled = c.sls != null && c.sls.enabled;
@@ -93,7 +108,12 @@ public final class ConfigValidator {
         if (runtime.windowSeconds < 1 || runtime.windowSeconds > 86400) errors.add("runtime.windowSeconds 必须在 1..86400");
         if (runtime.requestTimeoutSeconds <= 0 || runtime.requestTimeoutSeconds > 300) errors.add("runtime.requestTimeoutSeconds 必须在 1..300");
         if (runtime.maxRetries < 0 || runtime.maxRetries > 20) errors.add("runtime.maxRetries 必须在 0..20");
-        if (runtime.retryBaseMillis < 0 || runtime.retryBaseMillis > 60000) errors.add("runtime.retryBaseMillis 必须在 0..60000");
+        if (runtime.retryBaseMillis < 1 || runtime.retryBaseMillis > 60000) errors.add("runtime.retryBaseMillis 必须在 1..60000");
+        if (runtime.retryMaxDelayMillis < runtime.retryBaseMillis || runtime.retryMaxDelayMillis > 3600000)
+            errors.add("runtime.retryMaxDelayMillis 必须不小于 retryBaseMillis 且不超过 3600000");
+        if (!Double.isFinite(runtime.retryJitterRatio)
+                || runtime.retryJitterRatio < 0d || runtime.retryJitterRatio > 1d)
+            errors.add("runtime.retryJitterRatio 必须在 0..1");
         if (runtime.maxPollAttempts < 1 || runtime.maxPollAttempts > 1000) errors.add("runtime.maxPollAttempts 必须在 1..1000");
         if (runtime.pollIntervalMillis < 0 || runtime.pollIntervalMillis > 60000) errors.add("runtime.pollIntervalMillis 必须在 0..60000");
     }
@@ -260,6 +280,7 @@ public final class ConfigValidator {
         if (c.storage.diskCheckIntervalSeconds < 1 || c.storage.diskCheckIntervalSeconds > 3600) {
             errors.add("storage.diskCheckIntervalSeconds 必须在 1..3600");
         }
+        validateOutboxQuota(c.storage.outboxQuota, errors);
         if (configured(c.storage.outboxDir) && configured(c.storage.stateDir)
                 && pathsOverlap(c.storage.outboxDir, c.storage.stateDir)) {
             errors.add("storage.outboxDir 和 stateDir 不能相同或相互嵌套");
@@ -272,6 +293,38 @@ public final class ConfigValidator {
         }
     }
 
+    /** 校验逻辑配额的字节边界、滞回顺序和全量校正周期。 */
+    private void validateOutboxQuota(CollectorConfig.OutboxQuotaConfig quota, List<String> errors) {
+        if (quota == null) {
+            errors.add("storage.outboxQuota 不能为空");
+            return;
+        }
+        if (quota.defaultBytes <= 0) errors.add("storage.outboxQuota.defaultBytes 必须为正数");
+        if (quota.minBytes <= 0) errors.add("storage.outboxQuota.minBytes 必须为正数");
+        if (quota.maxBytes <= 0) errors.add("storage.outboxQuota.maxBytes 必须为正数");
+        if (quota.reservedFreeBytes <= 0) errors.add("storage.outboxQuota.reservedFreeBytes 必须为正数");
+        if (quota.minBytes > 0 && quota.defaultBytes > 0 && quota.maxBytes > 0
+                && !(quota.minBytes <= quota.defaultBytes && quota.defaultBytes <= quota.maxBytes)) {
+            errors.add("storage.outboxQuota 必须满足 minBytes <= defaultBytes <= maxBytes");
+        }
+        if (quota.warningPercent < 1 || quota.warningPercent > 99) {
+            errors.add("storage.outboxQuota.warningPercent 必须在 1..99");
+        }
+        if (quota.criticalPercent < 1 || quota.criticalPercent > 99) {
+            errors.add("storage.outboxQuota.criticalPercent 必须在 1..99");
+        }
+        if (quota.resumePercent < 1 || quota.resumePercent > 99) {
+            errors.add("storage.outboxQuota.resumePercent 必须在 1..99");
+        }
+        if (!(quota.resumePercent < quota.warningPercent
+                && quota.warningPercent < quota.criticalPercent)) {
+            errors.add("storage.outboxQuota 水位必须满足 resumePercent < warningPercent < criticalPercent");
+        }
+        if (quota.checkIntervalSeconds < 1 || quota.checkIntervalSeconds > 3600) {
+            errors.add("storage.outboxQuota.checkIntervalSeconds 必须在 1..3600");
+        }
+    }
+
     /** 校验任务领取地址和控制轮询间隔。 */
     private void validateControl(CollectorConfig.ControlConfig control, CollectorConfig.SecurityConfig security,
                                  List<String> errors) {
@@ -279,18 +332,75 @@ public final class ConfigValidator {
             errors.add("control 不能为空");
             return;
         }
-        if (control.enabled) required(errors, "control.taskClaimUrl", control.taskClaimUrl);
+        if (control.enabled) {
+            required(errors, "control.taskClaimUrl", control.taskClaimUrl);
+            required(errors, "control.jobStatusUrl", control.jobStatusUrl);
+            required(errors, "control.statusReportUrl", control.statusReportUrl);
+        }
         if (configured(control.taskClaimUrl)) httpUrl(errors, "control.taskClaimUrl", control.taskClaimUrl);
+        if (configured(control.jobStatusUrl)) {
+            httpUrl(errors, "control.jobStatusUrl", control.jobStatusUrl.replace("{job_id}", "job-1"));
+        }
+        if (configured(control.statusReportUrl)) httpUrl(errors, "control.statusReportUrl", control.statusReportUrl);
+        fixedControlPath(errors, "control.taskClaimUrl", control.taskClaimUrl, "/collector/v1/jobs:claim", false);
+        fixedControlPath(errors, "control.jobStatusUrl", control.jobStatusUrl,
+                "/collector/v1/jobs/{job_id}/status", true);
+        fixedControlPath(errors, "control.statusReportUrl", control.statusReportUrl,
+                "/collector/v1/status", false);
         if (control.heartbeatIntervalSeconds < 1 || control.heartbeatIntervalSeconds > 86400) {
             errors.add("control.heartbeatIntervalSeconds 必须在 1..86400");
+        }
+        if (control.statusChangeMinIntervalMillis < 100
+                || control.statusChangeMinIntervalMillis > control.heartbeatIntervalSeconds * 1000L) {
+            errors.add("control.statusChangeMinIntervalMillis 必须在 100..heartbeatIntervalSeconds*1000");
         }
         if (control.taskPollIntervalSeconds < 1 || control.taskPollIntervalSeconds > 86400) {
             errors.add("control.taskPollIntervalSeconds 必须在 1..86400");
         }
+        if (control.taskPollJitterSeconds < 0
+                || control.taskPollJitterSeconds >= control.taskPollIntervalSeconds) {
+            errors.add("control.taskPollJitterSeconds 必须在 0..taskPollIntervalSeconds-1");
+        }
+        timeout(errors, "control.connectTimeoutSeconds", control.connectTimeoutSeconds);
         timeout(errors, "control.requestTimeoutSeconds", control.requestTimeoutSeconds);
+        if (control.retryInitialDelayMillis < 1 || control.retryInitialDelayMillis > 3_600_000) {
+            errors.add("control.retryInitialDelayMillis 必须在 1..3600000");
+        }
+        if (control.retryMaxDelayMillis < control.retryInitialDelayMillis
+                || control.retryMaxDelayMillis > 86_400_000) {
+            errors.add("control.retryMaxDelayMillis 必须不小于 retryInitialDelayMillis 且不大于 86400000");
+        }
+        if (!Double.isFinite(control.retryJitterRatio)
+                || control.retryJitterRatio < 0 || control.retryJitterRatio > 1) {
+            errors.add("control.retryJitterRatio 必须在 0..1");
+        }
         if (control.enabled && security != null && security.mtlsEnabled) {
             httpsUrl(errors, "control.taskClaimUrl", control.taskClaimUrl);
+            httpsUrl(errors, "control.jobStatusUrl", control.jobStatusUrl);
+            httpsUrl(errors, "control.statusReportUrl", control.statusReportUrl);
         }
+    }
+
+    private void fixedControlPath(List<String> errors, String name, String value,
+                                  String expectedPath, boolean template) {
+        if (!configured(value)) return;
+        try {
+            String parseable = template ? value.replace("{job_id}", "job-1") : value;
+            URI uri = URI.create(parseable);
+            String actual = template ? uri.getPath().replace("job-1", "{job_id}") : uri.getPath();
+            if (!expectedPath.equals(actual) || uri.getRawQuery() != null || uri.getFragment() != null
+                    || (template && count(value, "{job_id}") != 1)) {
+                errors.add(name + " 必须使用固定路径 " + expectedPath + "，且不能包含查询参数或片段");
+            }
+        } catch (Exception ignored) {
+            // httpUrl 已报告 URL 语法错误。
+        }
+    }
+
+    private int count(String value, String token) {
+        int result = 0;
+        for (int offset = 0; (offset = value.indexOf(token, offset)) >= 0; offset += token.length()) result++;
+        return result;
     }
 
     /**
@@ -324,15 +434,19 @@ public final class ConfigValidator {
             else for (var q : a.traceQueries) {
                 if (q == null) { errors.add("arms.traceQueries 不能包含 null"); continue; }
                 task(errors, names, "arms.traceQueries", q.name, q.recordType);
+                validatePageMapping(q.pagination, false, errors);
+                reservedParameters(q.parameters, Set.of("StartTime", "EndTime", "PageNumber", "PageSize"), errors);
                 validateNormalization(errors, "arms.traceQueries." + q.name + ".normalization", q.normalization);
             }
             if (a.metricQueries == null) errors.add("arms.metricQueries 不能为空");
             else for (var q : a.metricQueries) {
                 if (q == null) { errors.add("arms.metricQueries 不能包含 null"); continue; }
                 task(errors, names, "arms.metricQueries", q.name, q.recordType);
+                validatePageMapping(q.pagination, false, errors);
+                reservedParameters(q.parameters, Set.of("StartTime", "EndTime", "Limit"), errors);
                 validateNormalization(errors, "arms.metricQueries." + q.name + ".normalization", q.normalization);
-                if (!"QueryMetric".equals(q.action) && !"QueryMetricByPage".equals(q.action)) {
-                    errors.add("指标任务 " + q.name + " 的 action 只能是 QueryMetric 或 QueryMetricByPage");
+                if (!"QueryMetric".equals(q.action)) {
+                    errors.add("指标 action 仅支持 QueryMetric；QueryMetricByPage 现场分页协议未确认，禁止启用，不能将第一页视为完整数据");
                 }
                 required(errors, "arms.metricQueries.metric", q.metric);
                 if (q.measures == null || q.measures.isEmpty()) errors.add("指标任务 " + q.name + " 缺少 measures");
@@ -352,6 +466,11 @@ public final class ConfigValidator {
             for (var q : a.dataset.queries) {
                 if (q == null) { errors.add("arms.dataset.queries 不能包含 null"); continue; }
                 task(errors, names, "arms.dataset.queries", q.name, q.recordType);
+                validatePageMapping(q.pagination, true, errors);
+                reservedParameters(q.parameters, Set.of("minTime", "maxTime"), errors);
+                if (q.pagination != null && q.pagination.cursorParameter != null && q.parameters != null
+                        && q.parameters.containsKey(q.pagination.cursorParameter))
+                    errors.add("Dataset parameters 不得预设分页游标");
                 validateNormalization(errors, "arms.dataset.queries." + q.name + ".normalization", q.normalization);
                 required(errors, "arms.dataset.queries.datasetId", q.datasetId);
                 if (q.measures == null) errors.add("Dataset 任务 " + q.name + " 的 measures 不能为空");
@@ -395,6 +514,29 @@ public final class ConfigValidator {
                 validateNormalization(errors, "sls." + p.project + "." + l.logstore + ".normalization", l.normalization);
             }
         }
+    }
+
+    private void reservedParameters(java.util.Map<String, String> parameters, Set<String> reserved, List<String> errors) {
+        if (parameters == null) { errors.add("parameters 不能为空"); return; }
+        if (parameters.keySet().stream().anyMatch(reserved::contains))
+            errors.add("parameters 不得覆盖受保护的窗口、分页或返回上限参数");
+    }
+
+    private void validatePageMapping(CollectorConfig.PageMapping m, boolean dataset, List<String> errors) {
+        if (m == null) { errors.add("任务 pagination 不能为空"); return; }
+        for (String p : new String[]{m.totalPointer, m.positionPointer, m.hasMorePointer, m.truncatedPointer, m.nextCursorPointer}) {
+            if (p != null && (!p.startsWith("/") || p.length() > 512 || p.matches(".*~([^01]|$).*")))
+                errors.add("分页元数据路径必须是有效且不超过 512 字符的 JSON Pointer");
+        }
+        boolean cursor = "CURSOR".equals(m.strategy);
+        if (!"SINGLE_RESPONSE".equals(m.strategy) && !(dataset && cursor))
+            errors.add("pagination.strategy 仅 Dataset 支持 CURSOR，其余使用 SINGLE_RESPONSE");
+        if (cursor && (m.nextCursorPointer == null || m.cursorParameter == null))
+            errors.add("Dataset CURSOR 必须按现场协议配置 nextCursorPointer 和 cursorParameter");
+        if (!cursor && m.cursorParameter != null) errors.add("cursorParameter 仅适用于 Dataset CURSOR");
+        if (m.cursorParameter != null && (!m.cursorParameter.matches("[A-Za-z][A-Za-z0-9_.-]{0,127}")
+                || Set.of("datasetId", "minTime", "maxTime", "intervalInSec", "measures", "_userId").contains(m.cursorParameter)))
+            errors.add("cursorParameter 非法或与受保护请求参数冲突");
     }
 
     /** 校验标准化字段准入配置，防止空字段、重复字段和无界列表进入常驻任务。 */

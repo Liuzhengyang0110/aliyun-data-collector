@@ -1,6 +1,8 @@
 package cn.kjky.collector.runtime;
 
 import cn.kjky.collector.config.CollectorConfig;
+import cn.kjky.collector.control.CollectionGate;
+import cn.kjky.collector.control.ManualPauseStateStore;
 import cn.kjky.collector.contract.BatchEnvelope;
 import cn.kjky.collector.contract.IngestJson;
 import cn.kjky.collector.contract.IngestResponse;
@@ -229,6 +231,67 @@ class CollectorDaemonUploadLoopTest {
         }
     }
 
+    @Test
+    void manualPauseStopsOnlyNewCollectionWindowsWhileUploadContinues() throws Exception {
+        Context context = context("manual-pause", 1);
+        context.config().runtime.deploymentMode = "PRODUCTION";
+        context.config().storage.rawPersistence.enabled = false;
+        context.config().arms.enabled = true;
+        context.config().sls.enabled = false;
+        context.config().scheduler.jitterSeconds = 0;
+        context.config().scheduler.arms.pollIntervalSeconds = 1;
+        context.outbox().enqueue(batch("pending-before-pause"));
+
+        ManualPauseStateStore pauses = new ManualPauseStateStore(
+                context.root().resolve("state").resolve(ManualPauseStateStore.FILE_NAME));
+        pauses.pause(null, 1, "operator pause", WINDOW_END);
+        CollectionGate gate = new CollectionGate(pauses, () -> true, () -> true, () -> true);
+        AtomicInteger queryWindows = new AtomicInteger();
+        ProductionPollScheduler collection = new ProductionPollScheduler(context.config(),
+                (source, queryEnd, lookback) -> queryWindows.incrementAndGet(), gate::collectionAllowed);
+        UploadLoop upload = uploadLoop(context);
+
+        try (CollectorDaemon daemon = new CollectorDaemon(null, null, gate, null, collection, upload)) {
+            daemon.start();
+            eventually(() -> queued(context.outbox()) == 0);
+            Thread.sleep(100);
+            assertThat(queryWindows).hasValue(0);
+            assertThat(received).hasValue(1);
+        }
+    }
+
+    @Test
+    void daemonCloseSafelyStopsIndependentControlLoop() {
+        TrackingLoop control = new TrackingLoop();
+        TrackingLoop collection = new TrackingLoop();
+        CollectorDaemon daemon = new CollectorDaemon(null, null, null, control, collection, null);
+
+        daemon.start();
+        daemon.close();
+
+        assertThat(control.started).isTrue();
+        assertThat(control.closed).isTrue();
+        assertThat(collection.started).isTrue();
+        assertThat(collection.closed).isTrue();
+    }
+
+    @Test
+    void daemonStartsAndClosesStatusLoopIndependently() {
+        TrackingLoop status = new TrackingLoop();
+        TrackingLoop control = new TrackingLoop();
+        TrackingLoop collection = new TrackingLoop();
+        CollectorDaemon daemon = new CollectorDaemon(null, null, null, control,
+                status, collection, null);
+
+        daemon.start();
+        daemon.close();
+
+        assertThat(status.started).isTrue();
+        assertThat(status.closed).isTrue();
+        assertThat(control.started).isTrue();
+        assertThat(collection.closed).isTrue();
+    }
+
     private Context context(String name, int maxInFlight) throws Exception {
         Path root = temp.resolve(name);
         CollectorConfig config = new CollectorConfig();
@@ -423,5 +486,13 @@ class CollectorDaemonUploadLoopTest {
                 }
             }
         }
+    }
+
+    private static final class TrackingLoop implements DaemonLoop {
+        private boolean started;
+        private boolean closed;
+
+        @Override public void start() { started = true; }
+        @Override public void close() { closed = true; }
     }
 }
