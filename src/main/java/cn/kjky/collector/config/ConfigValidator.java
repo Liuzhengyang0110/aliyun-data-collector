@@ -68,6 +68,14 @@ public final class ConfigValidator {
         if (c.control != null && c.control.enabled && c.rawPersistenceEnabled()) {
             errors.add("启用 control 时必须关闭 storage.rawPersistence.enabled，以便使用 Outbox 配额闭环");
         }
+        if (c.runtime != null && c.runtime.requireManualStart) {
+            if (c.control == null || !c.control.enabled) {
+                errors.add("runtime.requireManualStart=true 需要 control.enabled=true；否则进程无法接收远程开始任务");
+            }
+            if (c.rawPersistenceEnabled()) {
+                errors.add("runtime.requireManualStart=true 需要关闭 storage.rawPersistence.enabled 并使用生产 Outbox 路径");
+            }
+        }
 
         boolean armsEnabled = c.arms != null && c.arms.enabled;
         boolean slsEnabled = c.sls != null && c.sls.enabled;

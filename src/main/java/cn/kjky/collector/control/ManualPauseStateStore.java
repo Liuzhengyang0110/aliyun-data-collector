@@ -33,12 +33,28 @@ public final class ManualPauseStateStore {
     private PauseState current;
 
     public ManualPauseStateStore(Path file) throws IOException {
+        this(file, false, false);
+    }
+
+    /**
+     * 在受控 daemon 首次启动时先原子保存全局暂停。缺少暂停文件但已有本地状态时，
+     * 将其视为旧状态迁移而不是干净首次部署，避免把策略版本重置为 0。
+     */
+    public ManualPauseStateStore(Path file, boolean requireManualStart, boolean legacyStatePresent) throws IOException {
         this.file = Objects.requireNonNull(file, "file 不能为空").toAbsolutePath().normalize();
         if (this.file.getParent() == null) throw new IllegalArgumentException("暂停状态文件必须有父目录");
         this.partial = this.file.resolveSibling(this.file.getFileName() + ".partial");
         Files.createDirectories(this.file.getParent());
         if (Files.exists(partial)) throw new IOException("发现未完成的暂停状态临时文件，已失败关闭: " + partial);
-        current = Files.exists(this.file) ? read() : PauseState.initial();
+        if (Files.exists(this.file)) {
+            current = read();
+        } else {
+            if (requireManualStart && legacyStatePresent) {
+                throw new IOException("启用首次等待但人工暂停文件缺失，且检测到旧任务/策略/采集状态；已失败关闭。请先对账旧 config_version 与未决任务，再按迁移步骤显式保留或初始化人工暂停状态: " + this.file);
+            }
+            current = PauseState.initial(requireManualStart);
+            if (requireManualStart) save(current);
+        }
     }
 
     public synchronized PauseState snapshot() {
@@ -135,8 +151,8 @@ public final class ManualPauseStateStore {
     @JsonIgnoreProperties(ignoreUnknown = false)
     public record PauseState(String schemaVersion, long configVersion, boolean globalPaused,
                              Set<CollectionSource> pausedSources, String reason, Instant updatedAt) {
-        static PauseState initial() {
-            return new PauseState(SCHEMA_VERSION, 0, false, Set.of(), null, Instant.EPOCH);
+        static PauseState initial(boolean paused) {
+            return new PauseState(SCHEMA_VERSION, 0, paused, Set.of(), null, Instant.EPOCH);
         }
     }
 }

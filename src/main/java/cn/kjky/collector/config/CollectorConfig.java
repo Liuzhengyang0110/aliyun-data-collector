@@ -102,6 +102,8 @@ public class CollectorConfig {
         public int maxPollAttempts = 10;
         /** 两次 SLS 轮询之间的等待毫秒数。 */
         public long pollIntervalMillis = 1000;
+        /** daemon 首次启动时先持久化全局人工暂停，等待中控 RESUME_COLLECTION。 */
+        public boolean requireManualStart = false;
     }
 
     public static class PaginationLimits {

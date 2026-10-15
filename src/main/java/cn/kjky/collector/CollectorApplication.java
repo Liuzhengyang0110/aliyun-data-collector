@@ -59,11 +59,19 @@ public final class CollectorApplication {
             // config 是 YAML 反序列化后的完整运行配置，后续服务只使用这个对象。
             CollectorConfig config = new ConfigLoader().load(Path.of(configPath));
             // 只有实际访问 API 的命令才要求当前进程已设置凭据环境变量。
-            boolean requireSecrets = List.of("probe", "discover", "collect", "resume", "daemon").contains(command);
+            boolean requireSecrets = List.of("probe", "discover", "collect", "resume", "daemon").contains(command)
+                    && !(config.runtime.requireManualStart
+                        && List.of("collect", "resume", "probe", "discover").contains(command));
             List<String> errors = new ConfigValidator().validate(config, requireSecrets);
             if (!errors.isEmpty()) {
                 System.err.println("配置校验失败:");
                 errors.forEach(e -> System.err.println("- " + e));
+                return 2;
+            }
+            if (config.runtime.requireManualStart
+                    && List.of("collect", "resume", "probe", "discover").contains(command)) {
+                System.err.println("配置校验失败:");
+                System.err.println("- runtime.requireManualStart=true 时，采集与云端诊断命令必须通过受控 daemon 执行；请勿使用 collect/resume/probe/discover 绕过人工开始门禁");
                 return 2;
             }
             // engine 统一编排发现、探测、预演和采集流程。

@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -36,10 +37,14 @@ class ControlLoopIntegrationTest {
     private ExecutorService serverExecutor;
     private final AtomicBoolean claimUnavailable = new AtomicBoolean();
     private final AtomicBoolean statusUnavailable = new AtomicBoolean();
+    private final AtomicBoolean loseNextStatusReplyAfterCommit = new AtomicBoolean();
+    private final CountDownLatch terminalReplyClosed = new CountDownLatch(1);
     private final AtomicBoolean includeUnknownField = new AtomicBoolean();
     private final AtomicInteger claims = new AtomicInteger();
     private final AtomicBoolean jobDelivered = new AtomicBoolean();
     private final List<String> reportedStatuses = new CopyOnWriteArrayList<>();
+    private final List<String> acceptedStatuses = new CopyOnWriteArrayList<>();
+    private final java.util.Set<String> committedStatuses = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     @BeforeEach
     void startServer() throws IOException {
@@ -103,6 +108,57 @@ class ControlLoopIntegrationTest {
         }
     }
 
+    @Test
+    void restartAfterPersistedEffectAndLostTerminalReceiptReportsOnlyTheTerminalState() throws Exception {
+        CollectorConfig config = config();
+        Path outbox = Files.createDirectories(temp.resolve("outbox-after-restart"));
+        Path state = Files.createDirectories(temp.resolve("state-after-restart"));
+        config.storage.outboxQuota.minBytes = 1024;
+        config.storage.outboxQuota.defaultBytes = 1024 * 1024;
+        config.storage.outboxQuota.maxBytes = 10L * 1024 * 1024;
+        config.storage.outboxQuota.reservedFreeBytes = 1024;
+        loseNextStatusReplyAfterCommit.set(true);
+
+        JobStateStore firstJobs = new JobStateStore(state.resolve(JobStateStore.FILE_NAME));
+        ManualPauseStateStore firstPauses = new ManualPauseStateStore(
+                state.resolve(ManualPauseStateStore.FILE_NAME));
+        try (OutboxQuotaManager quotas = new OutboxQuotaManager(config, outbox, state);
+             ControlClient client = new ControlClient(config.control, HttpClient.newHttpClient());
+             JobPoller poller = new JobPoller(config, client,
+                     new JobExecutor(config, firstJobs, firstPauses, quotas), firstJobs)) {
+            poller.start();
+            assertThat(terminalReplyClosed.await(8, TimeUnit.SECONDS)).isTrue();
+            eventually(() -> firstJobs.find("pause-1").map(record ->
+                    record.status() == ControlProtocol.Status.SUCCEEDED && !record.reported()).orElse(false));
+            assertThat(firstPauses.snapshot().configVersion()).isEqualTo(1);
+            assertThat(firstPauses.paused(CollectionSource.ARMS)).isTrue();
+            Thread.sleep(100);
+        }
+        int acceptedBeforeRestart = acceptedStatuses.size();
+
+        // Reopening the same durable files models a process crash after local persistence and a lost HTTP receipt.
+        JobStateStore restartedJobs = new JobStateStore(state.resolve(JobStateStore.FILE_NAME));
+        ManualPauseStateStore restartedPauses = new ManualPauseStateStore(
+                state.resolve(ManualPauseStateStore.FILE_NAME));
+        assertThat(restartedJobs.pendingReports()).singleElement()
+                .satisfies(record -> assertThat(record.status()).isEqualTo(ControlProtocol.Status.SUCCEEDED));
+        statusUnavailable.set(false);
+        try (OutboxQuotaManager quotas = new OutboxQuotaManager(config, outbox, state);
+             ControlClient client = new ControlClient(config.control, HttpClient.newHttpClient());
+             JobPoller poller = new JobPoller(config, client,
+                     new JobExecutor(config, restartedJobs, restartedPauses, quotas), restartedJobs)) {
+            poller.start();
+            eventually(() -> restartedJobs.pendingReports().isEmpty());
+            assertThat(acceptedStatuses.subList(acceptedBeforeRestart, acceptedStatuses.size()))
+                    .containsExactly("SUCCEEDED");
+            assertThat(committedStatuses).contains("pause-1:SUCCEEDED");
+            assertThat(restartedJobs.find("pause-1").orElseThrow().status())
+                    .isEqualTo(ControlProtocol.Status.SUCCEEDED);
+            assertThat(restartedPauses.snapshot().configVersion()).isEqualTo(1);
+            assertThat(restartedPauses.paused(CollectionSource.ARMS)).isTrue();
+        }
+    }
+
     private CollectorConfig config() {
         CollectorConfig config = new CollectorConfig();
         config.collector.collectorId = "collector-1";
@@ -155,11 +211,20 @@ class ControlLoopIntegrationTest {
         String request = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         String status = field(request, "status");
         if (status != null) reportedStatuses.add(status);
+        String jobId = field(request, "job_id");
         if (statusUnavailable.get()) {
             send(exchange, 503, "{}");
             return;
         }
-        String jobId = field(request, "job_id");
+        if (status != null) {
+            committedStatuses.add(jobId + ":" + status);
+            acceptedStatuses.add(status);
+        }
+        if ("SUCCEEDED".equals(status) && loseNextStatusReplyAfterCommit.compareAndSet(true, false)) {
+            exchange.close();
+            terminalReplyClosed.countDown();
+            return;
+        }
         String body = "{\"schema_version\":\"1.0\",\"job_id\":\"" + jobId
                 + "\",\"accepted_status\":\"" + status
                 + "\",\"received_at\":\"" + Instant.now() + "\"}";

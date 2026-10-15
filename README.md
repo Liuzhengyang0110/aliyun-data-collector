@@ -311,6 +311,8 @@ sls:
 
 `upload.enabled`、`security.mtlsEnabled` 和 `control.enabled` 默认关闭。启用 `upload.enabled` 后，`daemon` 会同时启动相互独立的采集循环和上传循环，持续消费 Outbox 的 pending 与到期 retry。启用 `control.enabled` 时必须关闭 raw 并使用生产 Outbox 路径，同时填写固定路径的 `taskClaimUrl`、带唯一 `{job_id}` 占位符的 `jobStatusUrl` 和固定路径的 `statusReportUrl`。默认任务轮询基线为 7 秒、正负 2 秒抖动，即约 5～9 秒；节点心跳默认 30 秒一次，状态连续变化按 `statusChangeMinIntervalMillis` 合并限频；通信失败按 1～30 秒有界抖动退避。mTLS 已同时接入上传、任务控制与节点状态客户端；PEM 模式使用 `clientCertificatePath` 和 `privateKeyPath`，KEYSTORE 模式使用 `keyStorePath`，两种模式不能混用，密码只通过环境变量名引用。
 
+`runtime.requireManualStart` 默认 `false`，保持现有自动运行行为。受控部署可显式设为 `true`：它只适用于 `daemon`，要求 `control.enabled=true` 且关闭 `storage.rawPersistence.enabled`。首次干净启动会先原子持久化全局人工暂停（`config_version=0`），然后才启动调度；控制领取、状态上报和 Outbox 上传仍独立运行。已有暂停状态按原策略恢复。若暂停状态缺失但状态目录或 Outbox 已有文件，程序会按旧状态迁移场景失败关闭，要求先对账旧版本/未决任务并显式处理，不能静默重置版本。一次性 `collect`/`resume` 命令保持原行为；它们不属于页面控制路径，启用该开关时不能运行。
+
 接口字段、哈希算法、状态码和中控端实现要求见 [cc-ingest v1 批量上传接口契约](docs/cc-ingest-v1接口契约.md)，机器可读定义见 [OpenAPI 3.1 文件](docs/openapi/cc-ingest-v1.openapi.yaml)。`upload.ingestUrl` 必须使用固定路径 `/collector/v1/events:batch`。
 
 控制任务、任务结果、节点心跳、远程 Outbox 逻辑配额及 mTLS 身份绑定规则见 [cc-control v1 接口契约](docs/cc-control-v1接口契约.md)，机器可读定义见 [cc-control OpenAPI 3.1 文件](docs/openapi/cc-control-v1.openapi.yaml)。P1-01 已接入 `/collector/v1/jobs:claim` 与 `/collector/v1/jobs/{job_id}/status`，P1-02 已接入 `/collector/v1/status`；采集端只主动出站连接，不开放入站控制或状态 HTTP 接口。首批只执行 `PAUSE_COLLECTION`、`RESUME_COLLECTION` 和 `SET_OUTBOX_QUOTA`，拒绝 Shell、任意路径/URL、AccessKey、私钥及未批准参数。

@@ -28,6 +28,7 @@ class CoreTest {
     @Test
     void validatesSiteValuesWithoutReadingSecrets() {
         CollectorConfig c = base();
+        assertThat(c.runtime.requireManualStart).isFalse();
         c.arms.enabled = true;
         c.arms.endpoint = "arms.internal.example";
         c.arms.regionId = "cn-test";
@@ -37,6 +38,20 @@ class CoreTest {
         q.recordType = "topology_edge";
         c.arms.traceQueries.add(q);
         assertThat(new ConfigValidator().validate(c, false)).isEmpty();
+    }
+
+    @Test
+    void manualStartRequiresControlAndDisabledRawPersistence() {
+        CollectorConfig c = base();
+        c.runtime.requireManualStart = true;
+        c.control.enabled = false;
+        assertThat(new ConfigValidator().validate(c, false))
+                .anyMatch(e -> e.contains("runtime.requireManualStart=true") && e.contains("control.enabled=true"));
+
+        c.control.enabled = true;
+        c.storage.rawPersistence.enabled = true;
+        assertThat(new ConfigValidator().validate(c, false))
+                .anyMatch(e -> e.contains("runtime.requireManualStart=true") && e.contains("rawPersistence.enabled"));
     }
 
     @Test

@@ -36,6 +36,11 @@ public final class CollectorDaemon implements AutoCloseable {
 
     /** 根据运行模式创建开发过渡调度器或生产任务级水位调度器。 */
     public CollectorDaemon(CollectorConfig config, CollectorEngine engine) throws Exception {
+        if (config.runtime != null && config.runtime.requireManualStart
+                && (config.control == null || !config.control.enabled || config.rawPersistenceEnabled())) {
+            throw new IllegalArgumentException(
+                    "runtime.requireManualStart=true 仅支持 control.enabled=true 且 raw 持久化关闭的 daemon 路径");
+        }
         OutboxStore outbox = null;
         ProductionPollScheduler productionScheduler = null;
         ManualPauseStateStore pauseStore = null;
@@ -54,11 +59,13 @@ public final class CollectorDaemon implements AutoCloseable {
                     new PollingWatermarkStore(watermark));
         } else {
             outbox = engine.daemonOutbox();
+            pauseStore = new ManualPauseStateStore(
+                    outbox.stateRoot().resolve(ManualPauseStateStore.FILE_NAME),
+                    config.runtime.requireManualStart,
+                    config.runtime.requireManualStart && hasLegacyState(outbox));
             this.capacityMonitor = new CapacityMonitor(config, outbox.outboxRoot(), outbox.stateRoot());
             this.outboxQuotaManager = new OutboxQuotaManager(config, outbox.outboxRoot(), outbox.stateRoot());
             outbox.attachSpaceGuard(outboxQuotaManager);
-            pauseStore = new ManualPauseStateStore(
-                    outbox.stateRoot().resolve(ManualPauseStateStore.FILE_NAME));
             boolean localConfigValid = new ConfigValidator().validate(config, false).isEmpty();
             this.collectionGate = new CollectionGate(pauseStore, outboxQuotaManager::collectionAllowed,
                     capacityMonitor::collectionAllowed, () -> localConfigValid);
@@ -91,6 +98,16 @@ public final class CollectorDaemon implements AutoCloseable {
             this.statusReporter = new StatusReporter(config, registry, new StatusClient(config));
         } else {
             this.statusReporter = null;
+        }
+    }
+
+    /** 检查缺少人工暂停文件时是否已有可证明该目录并非首次部署的本地状态。 */
+    private static boolean hasLegacyState(OutboxStore outbox) throws java.io.IOException {
+        try (var files = java.nio.file.Files.walk(outbox.stateRoot())) {
+            if (files.anyMatch(java.nio.file.Files::isRegularFile)) return true;
+        }
+        try (var files = java.nio.file.Files.walk(outbox.outboxRoot())) {
+            return files.anyMatch(java.nio.file.Files::isRegularFile);
         }
     }
 
